@@ -22,10 +22,24 @@ async def health_check() -> dict:
 async def ingest_data(request: Request) -> Response:
     token = request.headers.get("api-key", "")
     if token != WRITE_TOKEN:
+        log.warning("Unauthorized ingest attempt from %s", request.client.host if request.client else "unknown")
         return Response(content={"error": "Unauthorized"}, status_code=401)
 
-    body = await request.json()
-    log.info("Received ingest payload")
+    try:
+        body = await request.json()
+    except Exception:
+        log.error("Failed to parse request body as JSON (content-type: %s, content-length: %s)",
+                  request.headers.get("content-type"), request.headers.get("content-length"))
+        return Response(content={"error": "Invalid JSON"}, status_code=400)
+
+    data = body.get("data", {})
+    metrics_list = data.get("metrics") or []
+    workouts_list = data.get("workouts") or []
+    metric_names = [m.get("name", "?") for m in metrics_list]
+    total_points = sum(len(m.get("data", [])) for m in metrics_list)
+    log.info("Ingest request: %d metric type(s) (%s), %d data point(s), %d workout(s)",
+             len(metrics_list), ", ".join(metric_names) if metric_names else "none",
+             total_points, len(workouts_list))
 
     try:
         result = await ingest_payload(body)
@@ -33,6 +47,16 @@ async def ingest_data(request: Request) -> Response:
             not v.get("success", True) for v in result.values() if isinstance(v, dict)
         )
         status = 207 if has_errors else 200
+
+        parts = []
+        for key, val in result.items():
+            if isinstance(val, dict):
+                saved = val.get("saved", 0)
+                parts.append(f"{key}: {saved} saved")
+                if val.get("errors"):
+                    parts.append(f"{key} errors: {val['errors']}")
+        log.info("Ingest result [%d]: %s", status, "; ".join(parts) if parts else "empty")
+
         return Response(content=result, status_code=status)
     except Exception:
         log.exception("Ingest failed")
