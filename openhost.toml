@@ -1,0 +1,18 @@
+[app]
+name = "apple-health"
+version = "0.1.0"
+description = "Ingests Apple Health data from Health Auto Export and provides a dashboard"
+
+[runtime.container]
+image = "Dockerfile"
+port = 8080
+
+[routing]
+health_check = "/health"
+
+[resources]
+memory_mb = 256
+cpu_millicores = 200
+
+[data]
+sqlite = ["health"]
