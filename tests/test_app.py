@@ -57,17 +57,32 @@ def test_query_heart_rate(stack):
     assert body["count"] >= 2
 
 
-def test_query_metrics(stack):
-    r = httpx.get(f"{stack.url}/api/v1/metrics/active_energy")
+def test_service_time_series(stack):
+    r = httpx.get(f"{stack.url}/api/v1/time-series?metric=heart_rate")
     assert r.status_code == 200
     body = r.json()
-    assert body["count"] >= 1
+    assert body["metric_id"] == "heart_rate"
+    assert body["unit"] == "bpm"
+    assert len(body["samples"]) >= 2
+
+    r2 = httpx.get(f"{stack.url}/api/v1/time-series?metric=active_energy")
+    assert r2.status_code == 200
+    body2 = r2.json()
+    assert body2["metric_id"] == "active_energy"
+    assert len(body2["samples"]) >= 1
 
 
-def test_list_metrics(stack):
+def test_service_list_metrics(stack):
     r = httpx.get(f"{stack.url}/api/v1/metrics")
     assert r.status_code == 200
-    assert len(r.json()["metrics"]) >= 1
+    metrics = r.json()["metrics"]
+    assert len(metrics) >= 2
+    ids = [m["metric_id"] for m in metrics]
+    assert "heart_rate" in ids
+    assert "active_energy" in ids
+    for m in metrics:
+        assert "kind" in m
+        assert "display_name" in m
 
 
 def test_stats(stack):
@@ -106,9 +121,19 @@ def test_ingest_workouts(stack):
     assert r.json()["workouts"]["success"] is True
 
 
-def test_query_workouts(stack):
+def test_service_workouts(stack):
     r = httpx.get(f"{stack.url}/api/v1/workouts")
     assert r.status_code == 200
     body = r.json()
     assert body["count"] >= 1
-    assert body["data"][0]["name"] == "Running"
+    w = body["data"][0]
+    assert w["workout_type"] == "running"
+    assert "metrics" in w
+    assert "duration" in w
+
+
+def test_service_sleep_sessions(stack):
+    r = httpx.get(f"{stack.url}/api/v1/sleep-sessions")
+    assert r.status_code == 200
+    body = r.json()
+    assert "data" in body

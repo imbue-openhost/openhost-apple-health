@@ -17,3 +17,8 @@ cpu_millicores = 200
 
 [data]
 sqlite = ["health"]
+
+[[services.v2.provides]]
+service = "github.com/zack/services/health-data"
+version = "0.1.0"
+endpoint = "/api/"

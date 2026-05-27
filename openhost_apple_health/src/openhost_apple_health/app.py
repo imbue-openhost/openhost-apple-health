@@ -6,6 +6,12 @@ from litestar.response import Response
 
 from . import db
 from .ingest import ingest_payload
+from .service import (
+    service_list_metrics,
+    service_get_time_series,
+    service_get_sleep_sessions,
+    service_get_workouts,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -103,130 +109,6 @@ async def get_heart_rate(request: Request) -> dict:
     }
 
 
-@get("/api/v1/metrics")
-async def list_metrics() -> dict:
-    async with db.connect() as conn:
-        rows = await (await conn.execute(
-            """SELECT DISTINCT metric_name, 'quantity' as type FROM metrics
-               UNION SELECT 'heart_rate', 'heart_rate'
-               WHERE EXISTS (SELECT 1 FROM heart_rate)
-               UNION SELECT 'sleep_analysis', 'sleep'
-               WHERE EXISTS (SELECT 1 FROM sleep_analysis)
-               ORDER BY type, metric_name"""
-        )).fetchall()
-    return {"metrics": [{"name": r[0], "type": r[1]} for r in rows]}
-
-
-@get("/api/v1/metrics/{metric_name:str}")
-async def get_metric(metric_name: str, request: Request) -> dict:
-    start = request.query_params.get("start")
-    end = request.query_params.get("end")
-    limit = int(request.query_params.get("limit", "5000"))
-
-    conditions = ["metric_name = ?"]
-    params: list = [metric_name]
-    if start:
-        conditions.append("date >= ?")
-        params.append(start)
-    if end:
-        conditions.append("date <= ?")
-        params.append(end)
-    params.append(limit)
-
-    where = " AND ".join(conditions)
-    async with db.connect() as conn:
-        rows = await (await conn.execute(
-            f"SELECT date, qty, units, source FROM metrics WHERE {where} ORDER BY date DESC LIMIT ?",
-            params,
-        )).fetchall()
-
-    return {
-        "metric": metric_name,
-        "count": len(rows),
-        "data": [
-            {"date": r[0], "qty": r[1], "units": r[2], "source": r[3]}
-            for r in reversed(rows)
-        ],
-    }
-
-
-@get("/api/v1/sleep")
-async def get_sleep(request: Request) -> dict:
-    start = request.query_params.get("start")
-    end = request.query_params.get("end")
-    limit = int(request.query_params.get("limit", "100"))
-
-    conditions = []
-    params: list = []
-    if start:
-        conditions.append("date >= ?")
-        params.append(start)
-    if end:
-        conditions.append("date <= ?")
-        params.append(end)
-    params.append(limit)
-
-    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
-    async with db.connect() as conn:
-        rows = await (await conn.execute(
-            f"""SELECT date, in_bed_start, in_bed_end, sleep_start, sleep_end,
-                       core, rem, deep, awake, in_bed, source
-                FROM sleep_analysis {where} ORDER BY date DESC LIMIT ?""",
-            params,
-        )).fetchall()
-
-    return {
-        "count": len(rows),
-        "data": [
-            {
-                "date": r[0], "in_bed_start": r[1], "in_bed_end": r[2],
-                "sleep_start": r[3], "sleep_end": r[4],
-                "core": r[5], "rem": r[6], "deep": r[7], "awake": r[8],
-                "in_bed": r[9], "source": r[10],
-            }
-            for r in reversed(rows)
-        ],
-    }
-
-
-@get("/api/v1/workouts")
-async def get_workouts(request: Request) -> dict:
-    start = request.query_params.get("start")
-    end = request.query_params.get("end")
-    limit = int(request.query_params.get("limit", "100"))
-
-    conditions = []
-    params: list = []
-    if start:
-        conditions.append("start_ts >= ?")
-        params.append(start)
-    if end:
-        conditions.append("start_ts <= ?")
-        params.append(end)
-    params.append(limit)
-
-    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
-    async with db.connect() as conn:
-        rows = await (await conn.execute(
-            f"""SELECT workout_id, name, start_ts, end_ts, duration,
-                       active_energy_qty, active_energy_units,
-                       distance_qty, distance_units
-                FROM workouts {where} ORDER BY start_ts DESC LIMIT ?""",
-            params,
-        )).fetchall()
-
-    return {
-        "count": len(rows),
-        "data": [
-            {
-                "id": r[0], "name": r[1], "start": r[2], "end": r[3],
-                "duration": r[4], "active_energy": r[5],
-                "active_energy_units": r[6],
-                "distance": r[7], "distance_units": r[8],
-            }
-            for r in reversed(rows)
-        ],
-    }
 
 
 @get("/api/v1/stats")
@@ -439,8 +321,9 @@ load(7);
 app = Litestar(
     route_handlers=[
         health_check, index, ingest_data,
-        get_heart_rate, list_metrics, get_metric,
-        get_sleep, get_workouts, get_stats,
+        get_heart_rate, get_stats,
+        service_list_metrics, service_get_time_series,
+        service_get_sleep_sessions, service_get_workouts,
     ],
     on_startup=[on_startup],
 )
