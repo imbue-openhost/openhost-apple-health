@@ -13,12 +13,13 @@ import attrs
 from health_data_service import (
     MetricKind,
     MetricType,
+    RoutePoint,
     Sample,
     SleepSession,
     TimeSeries,
+    Workout,
 )
-from health_data_service.data_types import Workout
-from health_data_service.specific_types import Duration
+from health_data_service.specific_types import Calories, Duration, HeartRate, HeartRateAvg
 from litestar import Request, get
 
 from . import db
@@ -273,7 +274,7 @@ async def service_get_workouts(request: Request) -> dict:
             params,
         )).fetchall()
 
-        results = []
+        workouts: list[Workout] = []
         for r in reversed(rows):
             row_dt = _parse_ts(r[2])
             if start_dt and row_dt < start_dt:
@@ -282,45 +283,47 @@ async def service_get_workouts(request: Request) -> dict:
                 continue
 
             wtype = WORKOUT_TYPE_MAP.get(r[1], "other")
-            metrics: dict[str, float] = {}
-            if r[4] is not None:
-                metrics["duration_s"] = r[4]
-            if r[5] is not None:
-                metrics["calories"] = r[5]
-            if r[7] is not None:
-                metrics["distance_m"] = r[7] * 1000 if r[8] == "km" else r[7]
+            kwargs: dict = {
+                "workout_type": wtype,
+                "start": row_dt,
+                "end": _parse_ts(r[3]),
+                "source": SOURCE,
+                "id": r[0],
+            }
 
-            w = Workout(
-                workout_type=wtype,
-                start=row_dt,
-                end=_parse_ts(r[3]),
-                metrics=metrics,
-                source=SOURCE,
-                id=r[0],
-            )
-            wd = _serialize(w)
+            if r[4] is not None:
+                kwargs["duration"] = Duration(value=r[4] / 60.0, source=SOURCE)
+            if r[5] is not None:
+                kwargs["calories"] = Calories(value=r[5], source=SOURCE)
 
             hr_rows = await (await conn.execute(
                 "SELECT date, avg_hr FROM workout_heart_rate WHERE workout_id = ? ORDER BY date",
                 (r[0],),
             )).fetchall()
             if hr_rows:
-                wd["heart_rate_trace"] = [
-                    {"timestamp": _parse_ts(h[0]).isoformat(), "value": h[1]} for h in hr_rows
-                ]
+                kwargs["heart_rate"] = HeartRate(
+                    source=SOURCE,
+                    samples=[Sample(timestamp=_parse_ts(h[0]), value=h[1]) for h in hr_rows],
+                )
+                vals = [h[1] for h in hr_rows]
+                kwargs["average_heart_rate"] = HeartRateAvg(value=sum(vals) / len(vals), source=SOURCE)
+                kwargs["max_heart_rate"] = HeartRateAvg(
+                    value=max(vals), source=SOURCE,
+                    metric_id="max_heart_rate", display_name="Max Heart Rate",
+                )
 
             route_rows = await (await conn.execute(
                 "SELECT timestamp, latitude, longitude, altitude FROM workout_route WHERE workout_id = ? ORDER BY timestamp",
                 (r[0],),
             )).fetchall()
             if route_rows:
-                wd["route"] = [
-                    {"timestamp": _parse_ts(p[0]).isoformat(), "lat": p[1], "lon": p[2], "altitude": p[3]}
+                kwargs["route"] = [
+                    RoutePoint(timestamp=_parse_ts(p[0]), lat=p[1], lon=p[2], altitude=p[3])
                     for p in route_rows
                 ]
 
-            results.append(wd)
-            if len(results) >= limit:
+            workouts.append(Workout(**kwargs))
+            if len(workouts) >= limit:
                 break
 
-    return {"count": len(results), "data": results}
+    return {"count": len(workouts), "data": [_serialize(w) for w in workouts]}

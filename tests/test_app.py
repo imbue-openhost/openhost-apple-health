@@ -128,8 +128,9 @@ def test_service_workouts(stack):
     assert body["count"] >= 1
     w = body["data"][0]
     assert w["workout_type"] == "running"
-    assert "metrics" in w
-    assert w["metrics"]["duration_s"] == 1800
+    assert w["duration"]["value"] == 30.0
+    assert w["heart_rate"] is not None
+    assert len(w["heart_rate"]["samples"]) >= 1
 
 
 def test_service_sleep_sessions(stack):
