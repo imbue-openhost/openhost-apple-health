@@ -7,7 +7,7 @@ service mesh.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 import attrs
 from health_data_service import (
@@ -60,16 +60,19 @@ def _serialize(obj):
 def _parse_ts(s: str) -> datetime:
     """Best-effort parse of various timestamp formats to datetime."""
     if not s:
-        return datetime.min
+        return datetime.min.replace(tzinfo=timezone.utc)
     try:
-        return datetime.fromisoformat(s)
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
     except ValueError:
         pass
     # HAE format: "2026-05-27 08:16:53 -0700"
     try:
         return datetime.strptime(s, "%Y-%m-%d %H:%M:%S %z")
     except ValueError:
-        return datetime.min
+        return datetime.min.replace(tzinfo=timezone.utc)
 
 
 @get("/api/v1/metrics")
@@ -136,57 +139,60 @@ async def service_get_time_series(request: Request) -> dict:
 
 
 async def _hr_time_series(start, end, limit) -> TimeSeries:
-    conditions = []
-    params: list = []
-    if start:
-        conditions.append("date >= ?")
-        params.append(start)
-    if end:
-        conditions.append("date <= ?")
-        params.append(end)
-    params.append(limit)
-
-    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     async with db.connect() as conn:
         rows = await (await conn.execute(
-            f"SELECT date, avg_hr FROM heart_rate {where} ORDER BY date LIMIT ?",
-            params,
+            "SELECT date, avg_hr FROM heart_rate ORDER BY date",
         )).fetchall()
+
+    start_dt = _parse_ts(start) if start else None
+    end_dt = _parse_ts(end) if end else None
+    samples: list[Sample] = []
+    for r in rows:
+        ts = _parse_ts(r[0])
+        if start_dt and ts < start_dt:
+            continue
+        if end_dt and ts > end_dt:
+            continue
+        samples.append(Sample(timestamp=ts, value=r[1]))
+        if len(samples) >= limit:
+            break
 
     return TimeSeries(
         metric_id="heart_rate",
         display_name="Heart Rate",
         unit="bpm",
         source=SOURCE,
-        samples=[Sample(timestamp=_parse_ts(r[0]), value=r[1]) for r in rows],
+        samples=samples,
     )
 
 
 async def _quantity_time_series(metric, start, end, limit) -> TimeSeries:
-    conditions = ["metric_name = ?"]
-    params: list = [metric]
-    if start:
-        conditions.append("date >= ?")
-        params.append(start)
-    if end:
-        conditions.append("date <= ?")
-        params.append(end)
-    params.append(limit)
-
-    where = " AND ".join(conditions)
     async with db.connect() as conn:
         rows = await (await conn.execute(
-            f"SELECT date, qty, units FROM metrics WHERE {where} ORDER BY date LIMIT ?",
-            params,
+            "SELECT date, qty, units FROM metrics WHERE metric_name = ? ORDER BY date",
+            (metric,),
         )).fetchall()
 
+    start_dt = _parse_ts(start) if start else None
+    end_dt = _parse_ts(end) if end else None
     unit = rows[0][2] if rows else None
+    samples: list[Sample] = []
+    for r in rows:
+        ts = _parse_ts(r[0])
+        if start_dt and ts < start_dt:
+            continue
+        if end_dt and ts > end_dt:
+            continue
+        samples.append(Sample(timestamp=ts, value=r[1]))
+        if len(samples) >= limit:
+            break
+
     return TimeSeries(
         metric_id=metric,
         display_name=metric.replace("_", " ").title(),
         unit=unit,
         source=SOURCE,
-        samples=[Sample(timestamp=_parse_ts(r[0]), value=r[1]) for r in rows],
+        samples=samples,
     )
 
 
@@ -196,27 +202,24 @@ async def service_get_sleep_sessions(request: Request) -> dict:
     end = request.query_params.get("end")
     limit = int(request.query_params.get("limit", "100"))
 
-    conditions = []
-    params: list = []
-    if start:
-        conditions.append("date >= ?")
-        params.append(start)
-    if end:
-        conditions.append("date <= ?")
-        params.append(end)
-    params.append(limit)
+    start_dt = _parse_ts(start) if start else None
+    end_dt = _parse_ts(end) if end else None
 
-    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     async with db.connect() as conn:
         rows = await (await conn.execute(
-            f"""SELECT date, in_bed_start, in_bed_end, sleep_start, sleep_end,
-                       core, rem, deep, awake, in_bed, source
-                FROM sleep_analysis {where} ORDER BY date DESC LIMIT ?""",
-            params,
+            "SELECT date, in_bed_start, in_bed_end, sleep_start, sleep_end,"
+            "       core, rem, deep, awake, in_bed, source"
+            " FROM sleep_analysis ORDER BY date DESC",
         )).fetchall()
 
     sessions: list[SleepSession] = []
     for r in reversed(rows):
+        row_dt = _parse_ts(r[0])
+        if start_dt and row_dt < start_dt:
+            continue
+        if end_dt and row_dt > end_dt:
+            continue
+
         source = r[10] or SOURCE
         core, rem, deep, awake, in_bed = r[5], r[6], r[7], r[8], r[9]
         total = (core or 0) + (rem or 0) + (deep or 0)
@@ -232,6 +235,8 @@ async def service_get_sleep_sessions(request: Request) -> dict:
             time_in_bed=Duration(value=in_bed, source=source, metric_id="duration", display_name="Time in Bed") if in_bed is not None else None,
             source=source,
         ))
+        if len(sessions) >= limit:
+            break
 
     return {"count": len(sessions), "data": [_serialize(s) for s in sessions]}
 
@@ -242,6 +247,9 @@ async def service_get_workouts(request: Request) -> dict:
     start = request.query_params.get("start")
     end = request.query_params.get("end")
     limit = int(request.query_params.get("limit", "100"))
+
+    start_dt = _parse_ts(start) if start else None
+    end_dt = _parse_ts(end) if end else None
 
     conditions = []
     params: list = []
@@ -254,13 +262,6 @@ async def service_get_workouts(request: Request) -> dict:
         else:
             conditions.append("name = ?")
             params.append(workout_type)
-    if start:
-        conditions.append("start_ts >= ?")
-        params.append(start)
-    if end:
-        conditions.append("start_ts <= ?")
-        params.append(end)
-    params.append(limit)
 
     where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     async with db.connect() as conn:
@@ -268,12 +269,18 @@ async def service_get_workouts(request: Request) -> dict:
             f"""SELECT workout_id, name, start_ts, end_ts, duration,
                        active_energy_qty, active_energy_units,
                        distance_qty, distance_units
-                FROM workouts {where} ORDER BY start_ts DESC LIMIT ?""",
+                FROM workouts {where} ORDER BY start_ts DESC""",
             params,
         )).fetchall()
 
     workouts: list[Workout] = []
     for r in reversed(rows):
+        row_dt = _parse_ts(r[2])
+        if start_dt and row_dt < start_dt:
+            continue
+        if end_dt and row_dt > end_dt:
+            continue
+
         wtype = WORKOUT_TYPE_MAP.get(r[1], "other")
         metrics: dict[str, float] = {}
         if r[4] is not None:
@@ -285,11 +292,13 @@ async def service_get_workouts(request: Request) -> dict:
 
         workouts.append(Workout(
             workout_type=wtype,
-            start=_parse_ts(r[2]),
+            start=row_dt,
             end=_parse_ts(r[3]),
             metrics=metrics,
             source=SOURCE,
             id=r[0],
         ))
+        if len(workouts) >= limit:
+            break
 
     return {"count": len(workouts), "data": [_serialize(w) for w in workouts]}
