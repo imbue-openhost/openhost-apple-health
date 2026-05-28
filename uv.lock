@@ -113,7 +113,7 @@ wheels = [
 [[package]]
 name = "health-data-service"
 version = "0.1.0"
-source = { git = "https://github.com/imbue-openhost/health-data-service-spec?branch=main#c55572596ead6ac6efa83c2a10bcb6ea642c5132" }
+source = { git = "https://github.com/imbue-openhost/health-data-service-spec?branch=main#c8de19c22cd121e4192306d1a99741a5df0ecb4c" }
 dependencies = [
     { name = "attrs" },
     { name = "cattrs" },
