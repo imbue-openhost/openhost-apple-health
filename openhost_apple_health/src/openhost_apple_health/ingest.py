@@ -217,6 +217,34 @@ async def _save_workouts(workouts_list: list[dict]) -> dict:
                     hr_rows,
                 )
 
+            await conn.execute(
+                "DELETE FROM workout_route WHERE workout_id = ?",
+                (workout_id,),
+            )
+
+            route_data = w.get("route") or []
+            route_rows = []
+            for pt in route_data:
+                ts = _normalize_ts(pt.get("timestamp"))
+                lat = pt.get("latitude") or pt.get("lat")
+                lon = pt.get("longitude") or pt.get("lon")
+                if not ts or lat is None or lon is None:
+                    continue
+                route_rows.append((
+                    workout_id, ts, lat, lon,
+                    pt.get("altitude"),
+                    pt.get("speed"),
+                    pt.get("course"),
+                ))
+
+            if route_rows:
+                await conn.executemany(
+                    """INSERT INTO workout_route
+                       (workout_id, timestamp, latitude, longitude, altitude, speed, course)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    route_rows,
+                )
+
             saved += 1
 
         await conn.commit()

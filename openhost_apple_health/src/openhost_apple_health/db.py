@@ -72,6 +72,17 @@ CREATE TABLE IF NOT EXISTS workout_heart_rate (
     source TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS workout_route (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workout_id TEXT NOT NULL REFERENCES workouts(workout_id) ON DELETE CASCADE,
+    timestamp TEXT NOT NULL,
+    latitude REAL NOT NULL,
+    longitude REAL NOT NULL,
+    altitude REAL,
+    speed REAL,
+    course REAL
+);
+
 CREATE TABLE IF NOT EXISTS raw_payloads (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     received_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
@@ -85,6 +96,7 @@ CREATE INDEX IF NOT EXISTS idx_heart_rate_date ON heart_rate(date);
 CREATE INDEX IF NOT EXISTS idx_sleep_date ON sleep_analysis(date);
 CREATE INDEX IF NOT EXISTS idx_workouts_start ON workouts(start_ts);
 CREATE INDEX IF NOT EXISTS idx_workout_hr_wid ON workout_heart_rate(workout_id);
+CREATE INDEX IF NOT EXISTS idx_workout_route_wid ON workout_route(workout_id);
 """
 
 

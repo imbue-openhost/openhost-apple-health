@@ -166,4 +166,5 @@ app = Litestar(
         service_get_sleep_sessions, service_get_workouts,
     ],
     on_startup=[on_startup],
+    request_max_body_size=100 * 1024 * 1024,
 )

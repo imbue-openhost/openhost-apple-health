@@ -273,32 +273,54 @@ async def service_get_workouts(request: Request) -> dict:
             params,
         )).fetchall()
 
-    workouts: list[Workout] = []
-    for r in reversed(rows):
-        row_dt = _parse_ts(r[2])
-        if start_dt and row_dt < start_dt:
-            continue
-        if end_dt and row_dt > end_dt:
-            continue
+        results = []
+        for r in reversed(rows):
+            row_dt = _parse_ts(r[2])
+            if start_dt and row_dt < start_dt:
+                continue
+            if end_dt and row_dt > end_dt:
+                continue
 
-        wtype = WORKOUT_TYPE_MAP.get(r[1], "other")
-        metrics: dict[str, float] = {}
-        if r[4] is not None:
-            metrics["duration_s"] = r[4]
-        if r[5] is not None:
-            metrics["calories"] = r[5]
-        if r[7] is not None:
-            metrics["distance_m"] = r[7] * 1000 if r[8] == "km" else r[7]
+            wtype = WORKOUT_TYPE_MAP.get(r[1], "other")
+            metrics: dict[str, float] = {}
+            if r[4] is not None:
+                metrics["duration_s"] = r[4]
+            if r[5] is not None:
+                metrics["calories"] = r[5]
+            if r[7] is not None:
+                metrics["distance_m"] = r[7] * 1000 if r[8] == "km" else r[7]
 
-        workouts.append(Workout(
-            workout_type=wtype,
-            start=row_dt,
-            end=_parse_ts(r[3]),
-            metrics=metrics,
-            source=SOURCE,
-            id=r[0],
-        ))
-        if len(workouts) >= limit:
-            break
+            w = Workout(
+                workout_type=wtype,
+                start=row_dt,
+                end=_parse_ts(r[3]),
+                metrics=metrics,
+                source=SOURCE,
+                id=r[0],
+            )
+            wd = _serialize(w)
 
-    return {"count": len(workouts), "data": [_serialize(w) for w in workouts]}
+            hr_rows = await (await conn.execute(
+                "SELECT date, avg_hr FROM workout_heart_rate WHERE workout_id = ? ORDER BY date",
+                (r[0],),
+            )).fetchall()
+            if hr_rows:
+                wd["heart_rate_trace"] = [
+                    {"timestamp": _parse_ts(h[0]).isoformat(), "value": h[1]} for h in hr_rows
+                ]
+
+            route_rows = await (await conn.execute(
+                "SELECT timestamp, latitude, longitude, altitude FROM workout_route WHERE workout_id = ? ORDER BY timestamp",
+                (r[0],),
+            )).fetchall()
+            if route_rows:
+                wd["route"] = [
+                    {"timestamp": _parse_ts(p[0]).isoformat(), "lat": p[1], "lon": p[2], "altitude": p[3]}
+                    for p in route_rows
+                ]
+
+            results.append(wd)
+            if len(results) >= limit:
+                break
+
+    return {"count": len(results), "data": results}
