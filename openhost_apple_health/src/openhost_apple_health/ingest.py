@@ -11,6 +11,26 @@ BLOOD_PRESSURE = "blood_pressure"
 SLEEP_ANALYSIS = "sleep_analysis"
 
 
+def _normalize_ts(ts: str | None) -> str | None:
+    """Normalize a timestamp string to ISO 8601 format.
+
+    Handles the HAE format "2026-05-27 08:16:53 -0700" and converts
+    it to "2026-05-27T08:16:53-07:00".
+    """
+    if not ts:
+        return ts
+    try:
+        dt = datetime.fromisoformat(ts)
+        return dt.isoformat()
+    except ValueError:
+        pass
+    try:
+        dt = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S %z")
+        return dt.isoformat()
+    except ValueError:
+        return ts
+
+
 async def ingest_payload(payload: dict) -> dict:
     raw_json = json.dumps(payload)
     data = payload.get("data", {})
@@ -67,7 +87,7 @@ async def _save_metrics(metrics_list: list[dict]) -> dict:
 async def _save_quantity_metrics(conn, name: str, data_points: list[dict], units: str) -> int:
     rows = []
     for dp in data_points:
-        date = dp.get("date")
+        date = _normalize_ts(dp.get("date"))
         qty = dp.get("qty")
         source = dp.get("source", "")
         if date is None or qty is None:
@@ -86,7 +106,7 @@ async def _save_quantity_metrics(conn, name: str, data_points: list[dict], units
 async def _save_heart_rate(conn, data_points: list[dict], units: str) -> int:
     rows = []
     for dp in data_points:
-        date = dp.get("date")
+        date = _normalize_ts(dp.get("date"))
         if date is None:
             continue
         min_hr = dp.get("Min")
@@ -109,15 +129,15 @@ async def _save_heart_rate(conn, data_points: list[dict], units: str) -> int:
 async def _save_sleep(conn, data_points: list[dict], units: str) -> int:
     rows = []
     for dp in data_points:
-        date = dp.get("date")
+        date = _normalize_ts(dp.get("date"))
         if date is None:
             continue
         rows.append((
             date,
-            dp.get("inBedStart", ""),
-            dp.get("inBedEnd", ""),
-            dp.get("sleepStart", ""),
-            dp.get("sleepEnd", ""),
+            _normalize_ts(dp.get("inBedStart")) or "",
+            _normalize_ts(dp.get("inBedEnd")) or "",
+            _normalize_ts(dp.get("sleepStart")) or "",
+            _normalize_ts(dp.get("sleepEnd")) or "",
             dp.get("core", 0),
             dp.get("rem", 0),
             dp.get("deep", 0),
@@ -158,8 +178,8 @@ async def _save_workouts(workouts_list: list[dict]) -> dict:
                 (
                     workout_id,
                     w.get("name", ""),
-                    w.get("start", ""),
-                    w.get("end", ""),
+                    _normalize_ts(w.get("start")) or "",
+                    _normalize_ts(w.get("end")) or "",
                     w.get("duration", 0),
                     ae.get("qty"),
                     ae.get("units"),
@@ -176,7 +196,7 @@ async def _save_workouts(workouts_list: list[dict]) -> dict:
             hr_data = w.get("heartRateData") or []
             hr_rows = []
             for hr in hr_data:
-                date = hr.get("date")
+                date = _normalize_ts(hr.get("date"))
                 if not date:
                     continue
                 hr_rows.append((

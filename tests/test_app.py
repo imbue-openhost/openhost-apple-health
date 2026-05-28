@@ -129,7 +129,7 @@ def test_service_workouts(stack):
     w = body["data"][0]
     assert w["workout_type"] == "running"
     assert "metrics" in w
-    assert "duration" in w
+    assert w["metrics"]["duration_s"] == 1800
 
 
 def test_service_sleep_sessions(stack):

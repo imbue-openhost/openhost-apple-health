@@ -1,17 +1,31 @@
 """Health data service API endpoints.
 
 Implements the provider side of the health-data service spec
-(github.com/zack/services/health-data). These endpoints are served
-under /api/ and consumed by other OpenHost apps via the service mesh.
+(github.com/imbue-openhost/health-data-service-spec). These endpoints
+are served under /api/ and consumed by other OpenHost apps via the
+service mesh.
 """
 
 import logging
+from datetime import datetime
 
+import attrs
+from health_data_service import (
+    MetricKind,
+    MetricType,
+    Sample,
+    SleepSession,
+    TimeSeries,
+)
+from health_data_service.data_types import Workout
+from health_data_service.specific_types import Duration
 from litestar import Request, get
 
 from . import db
 
 log = logging.getLogger(__name__)
+
+SOURCE = "apple_health"
 
 WORKOUT_TYPE_MAP = {
     "Running": "running",
@@ -26,21 +40,53 @@ WORKOUT_TYPE_MAP = {
 }
 
 
+def _serialize(obj):
+    """Recursively convert attrs instances to dicts for JSON response."""
+    if attrs.has(type(obj)):
+        d = {}
+        for field in attrs.fields(type(obj)):
+            val = getattr(obj, field.name)
+            d[field.name] = _serialize(val)
+        return d
+    if isinstance(obj, list):
+        return [_serialize(v) for v in obj]
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if isinstance(obj, dict):
+        return {k: _serialize(v) for k, v in obj.items()}
+    return obj
+
+
+def _parse_ts(s: str) -> datetime:
+    """Best-effort parse of various timestamp formats to datetime."""
+    if not s:
+        return datetime.min
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        pass
+    # HAE format: "2026-05-27 08:16:53 -0700"
+    try:
+        return datetime.strptime(s, "%Y-%m-%d %H:%M:%S %z")
+    except ValueError:
+        return datetime.min
+
+
 @get("/api/v1/metrics")
 async def service_list_metrics() -> dict:
-    metrics = []
+    metrics: list[MetricType] = []
 
     async with db.connect() as conn:
         hr_exists = await (await conn.execute(
             "SELECT 1 FROM heart_rate LIMIT 1"
         )).fetchone()
         if hr_exists:
-            metrics.append({
-                "metric_id": "heart_rate",
-                "display_name": "Heart Rate",
-                "kind": "time_series",
-                "unit": "bpm",
-            })
+            metrics.append(MetricType(
+                metric_id="heart_rate",
+                display_name="Heart Rate",
+                kind=MetricKind.TIME_SERIES,
+                unit="bpm",
+            ))
 
         quantity_names = await (await conn.execute(
             "SELECT DISTINCT metric_name FROM metrics ORDER BY metric_name"
@@ -50,25 +96,25 @@ async def service_list_metrics() -> dict:
             unit_row = await (await conn.execute(
                 "SELECT units FROM metrics WHERE metric_name = ? LIMIT 1", (name,)
             )).fetchone()
-            metrics.append({
-                "metric_id": name,
-                "display_name": name.replace("_", " ").title(),
-                "kind": "time_series",
-                "unit": unit_row[0] if unit_row else None,
-            })
+            metrics.append(MetricType(
+                metric_id=name,
+                display_name=name.replace("_", " ").title(),
+                kind=MetricKind.TIME_SERIES,
+                unit=unit_row[0] if unit_row else None,
+            ))
 
         sleep_exists = await (await conn.execute(
             "SELECT 1 FROM sleep_analysis LIMIT 1"
         )).fetchone()
         if sleep_exists:
-            metrics.append({
-                "metric_id": "sleep_analysis",
-                "display_name": "Sleep Analysis",
-                "kind": "time_series",
-                "unit": None,
-            })
+            metrics.append(MetricType(
+                metric_id="sleep_analysis",
+                display_name="Sleep Analysis",
+                kind=MetricKind.TIME_SERIES,
+                unit=None,
+            ))
 
-    return {"metrics": metrics}
+    return {"metrics": [_serialize(m) for m in metrics]}
 
 
 @get("/api/v1/time-series")
@@ -82,12 +128,14 @@ async def service_get_time_series(request: Request) -> dict:
         return {"error": "metric parameter required"}
 
     if metric == "heart_rate":
-        return await _hr_time_series(start, end, limit)
+        ts = await _hr_time_series(start, end, limit)
+    else:
+        ts = await _quantity_time_series(metric, start, end, limit)
 
-    return await _quantity_time_series(metric, start, end, limit)
+    return _serialize(ts)
 
 
-async def _hr_time_series(start, end, limit) -> dict:
+async def _hr_time_series(start, end, limit) -> TimeSeries:
     conditions = []
     params: list = []
     if start:
@@ -105,19 +153,16 @@ async def _hr_time_series(start, end, limit) -> dict:
             params,
         )).fetchall()
 
-    return {
-        "metric_id": "heart_rate",
-        "display_name": "Heart Rate",
-        "unit": "bpm",
-        "source": "apple_health",
-        "samples": [
-            {"timestamp": r[0], "value": r[1]}
-            for r in rows
-        ],
-    }
+    return TimeSeries(
+        metric_id="heart_rate",
+        display_name="Heart Rate",
+        unit="bpm",
+        source=SOURCE,
+        samples=[Sample(timestamp=_parse_ts(r[0]), value=r[1]) for r in rows],
+    )
 
 
-async def _quantity_time_series(metric, start, end, limit) -> dict:
+async def _quantity_time_series(metric, start, end, limit) -> TimeSeries:
     conditions = ["metric_name = ?"]
     params: list = [metric]
     if start:
@@ -136,16 +181,13 @@ async def _quantity_time_series(metric, start, end, limit) -> dict:
         )).fetchall()
 
     unit = rows[0][2] if rows else None
-    return {
-        "metric_id": metric,
-        "display_name": metric.replace("_", " ").title(),
-        "unit": unit,
-        "source": "apple_health",
-        "samples": [
-            {"timestamp": r[0], "value": r[1]}
-            for r in rows
-        ],
-    }
+    return TimeSeries(
+        metric_id=metric,
+        display_name=metric.replace("_", " ").title(),
+        unit=unit,
+        source=SOURCE,
+        samples=[Sample(timestamp=_parse_ts(r[0]), value=r[1]) for r in rows],
+    )
 
 
 @get("/api/v1/sleep-sessions")
@@ -173,36 +215,25 @@ async def service_get_sleep_sessions(request: Request) -> dict:
             params,
         )).fetchall()
 
-    def _scalar(metric_id, display_name, unit, value, source):
-        return {
-            "metric_id": metric_id,
-            "display_name": display_name,
-            "unit": unit,
-            "value": value,
-            "source": source,
-        }
-
-    sessions = []
+    sessions: list[SleepSession] = []
     for r in reversed(rows):
-        source = r[10] or "apple_health"
-        session = {
-            "start": r[3] or r[1],
-            "end": r[4] or r[2],
-            "source": source,
-        }
-        if r[5] is not None and r[6] is not None and r[7] is not None:
-            total = r[5] + r[6] + r[7]
-            session["total_duration"] = _scalar("duration", "Duration", "min", total, source)
-            session["deep_sleep_duration"] = _scalar("duration", "Deep Sleep", "min", r[7], source)
-            session["light_sleep_duration"] = _scalar("duration", "Light Sleep", "min", r[5], source)
-            session["rem_sleep_duration"] = _scalar("duration", "REM Sleep", "min", r[6], source)
-        if r[8] is not None:
-            session["awake_time"] = _scalar("duration", "Awake Time", "min", r[8], source)
-        if r[9] is not None:
-            session["time_in_bed"] = _scalar("duration", "Time in Bed", "min", r[9], source)
-        sessions.append(session)
+        source = r[10] or SOURCE
+        core, rem, deep, awake, in_bed = r[5], r[6], r[7], r[8], r[9]
+        total = (core or 0) + (rem or 0) + (deep or 0)
 
-    return {"count": len(sessions), "data": sessions}
+        sessions.append(SleepSession(
+            start=_parse_ts(r[3] or r[1]),
+            end=_parse_ts(r[4] or r[2]),
+            total_duration=Duration(value=total, source=source) if total else None,
+            deep_sleep_duration=Duration(value=deep, source=source, metric_id="duration", display_name="Deep Sleep") if deep is not None else None,
+            light_sleep_duration=Duration(value=core, source=source, metric_id="duration", display_name="Light Sleep") if core is not None else None,
+            rem_sleep_duration=Duration(value=rem, source=source, metric_id="duration", display_name="REM Sleep") if rem is not None else None,
+            awake_time=Duration(value=awake, source=source, metric_id="duration", display_name="Awake Time") if awake is not None else None,
+            time_in_bed=Duration(value=in_bed, source=source, metric_id="duration", display_name="Time in Bed") if in_bed is not None else None,
+            source=source,
+        ))
+
+    return {"count": len(sessions), "data": [_serialize(s) for s in sessions]}
 
 
 @get("/api/v1/workouts")
@@ -241,38 +272,24 @@ async def service_get_workouts(request: Request) -> dict:
             params,
         )).fetchall()
 
-    def _scalar(metric_id, display_name, unit, value, source):
-        return {
-            "metric_id": metric_id,
-            "display_name": display_name,
-            "unit": unit,
-            "value": value,
-            "source": source,
-        }
-
-    workouts = []
+    workouts: list[Workout] = []
     for r in reversed(rows):
         wtype = WORKOUT_TYPE_MAP.get(r[1], "other")
-        w = {
-            "start": r[2],
-            "end": r[3],
-            "workout_type": wtype,
-            "source": "apple_health",
-            "id": r[0],
-        }
-
-        metrics = {}
+        metrics: dict[str, float] = {}
         if r[4] is not None:
-            w["duration"] = _scalar("duration", "Duration", "s", r[4], "apple_health")
             metrics["duration_s"] = r[4]
         if r[5] is not None:
-            w["calories"] = _scalar("calories", "Calories", r[6] or "kcal", r[5], "apple_health")
             metrics["calories"] = r[5]
         if r[7] is not None:
-            distance_m = r[7] * 1000 if r[8] == "km" else r[7]
-            metrics["distance_m"] = distance_m
-        w["metrics"] = metrics
+            metrics["distance_m"] = r[7] * 1000 if r[8] == "km" else r[7]
 
-        workouts.append(w)
+        workouts.append(Workout(
+            workout_type=wtype,
+            start=_parse_ts(r[2]),
+            end=_parse_ts(r[3]),
+            metrics=metrics,
+            source=SOURCE,
+            id=r[0],
+        ))
 
-    return {"count": len(workouts), "data": workouts}
+    return {"count": len(workouts), "data": [_serialize(w) for w in workouts]}
