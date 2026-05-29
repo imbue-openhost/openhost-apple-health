@@ -30,14 +30,36 @@ SOURCE = "apple_health"
 
 WORKOUT_TYPE_MAP = {
     "Running": "running",
+    "Outdoor Run": "running",
+    "Indoor Run": "running",
+    "Trail Run": "running",
     "Cycling": "cycling",
+    "Outdoor Cycling": "cycling",
+    "Indoor Cycling": "cycling",
     "Swimming": "swimming",
+    "Open Water Swimming": "swimming",
+    "Pool Swimming": "swimming",
     "Walking": "walking",
+    "Outdoor Walk": "walking",
+    "Indoor Walk": "walking",
     "Hiking": "hiking",
     "Strength Training": "strength",
-    "Yoga": "yoga",
     "Traditional Strength Training": "strength",
     "Functional Strength Training": "strength",
+    "Yoga": "yoga",
+    "High Intensity Interval Training": "hiit",
+    "HIIT": "hiit",
+    "Elliptical": "elliptical",
+    "Rowing": "rowing",
+    "Indoor Rowing": "rowing",
+    "Outdoor Rowing": "rowing",
+    "Stair Climbing": "stair_climbing",
+    "Dance": "dance",
+    "Pilates": "pilates",
+    "Core Training": "core_training",
+    "Cross Training": "cross_training",
+    "Kickboxing": "kickboxing",
+    "Martial Arts": "martial_arts",
 }
 
 
@@ -282,7 +304,7 @@ async def service_get_workouts(request: Request) -> dict:
             if end_dt and row_dt > end_dt:
                 continue
 
-            wtype = WORKOUT_TYPE_MAP.get(r[1], "other")
+            wtype = WORKOUT_TYPE_MAP.get(r[1], r[1].lower() if r[1] else "other")
             kwargs: dict = {
                 "workout_type": wtype,
                 "start": row_dt,
