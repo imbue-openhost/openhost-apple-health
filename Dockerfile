@@ -6,6 +6,9 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
+RUN mkdir -p openhost_apple_health/src/openhost_apple_health && touch openhost_apple_health/src/openhost_apple_health/__init__.py
+RUN uv sync --no-dev
+
 COPY openhost_apple_health/ openhost_apple_health/
 RUN uv sync --no-dev
 
