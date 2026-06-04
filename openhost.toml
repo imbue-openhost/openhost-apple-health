@@ -12,8 +12,8 @@ health_check = "/health"
 public_paths = ["/api/data"]
 
 [resources]
-memory_mb = 256
-cpu_millicores = 200
+memory_mb = 512
+cpu_millicores = 500
 
 [data]
 sqlite = ["health"]

@@ -1,25 +1,13 @@
 """Health data service API endpoints.
 
 Implements the provider side of the health-data service spec
-(github.com/imbue-openhost/health-data-service-spec). These endpoints
-are served under /api/ and consumed by other OpenHost apps via the
-service mesh.
+(github.com/zack/services/health-data). These endpoints are served
+under /api/ and consumed by other OpenHost apps via the service mesh.
 """
 
+import gzip
 import logging
-from datetime import datetime, timezone
 
-import attrs
-from health_data_service import (
-    MetricKind,
-    MetricType,
-    RoutePoint,
-    Sample,
-    SleepSession,
-    TimeSeries,
-    Workout,
-)
-from health_data_service.specific_types import Calories, Duration, HeartRate, HeartRateAvg
 from litestar import Request, get
 
 from . import db
@@ -28,91 +16,78 @@ log = logging.getLogger(__name__)
 
 SOURCE = "apple_health"
 
-WORKOUT_TYPE_MAP = {
-    "Running": "running",
-    "Outdoor Run": "running",
-    "Indoor Run": "running",
-    "Trail Run": "running",
-    "Cycling": "cycling",
-    "Outdoor Cycling": "cycling",
-    "Indoor Cycling": "cycling",
-    "Swimming": "swimming",
-    "Open Water Swimming": "swimming",
-    "Pool Swimming": "swimming",
-    "Walking": "walking",
-    "Outdoor Walk": "walking",
-    "Indoor Walk": "walking",
-    "Hiking": "hiking",
-    "Strength Training": "strength",
-    "Traditional Strength Training": "strength",
-    "Functional Strength Training": "strength",
-    "Yoga": "yoga",
-    "High Intensity Interval Training": "hiit",
-    "HIIT": "hiit",
-    "Elliptical": "elliptical",
-    "Rowing": "rowing",
-    "Indoor Rowing": "rowing",
-    "Outdoor Rowing": "rowing",
-    "Stair Climbing": "stair_climbing",
-    "Dance": "dance",
-    "Pilates": "pilates",
-    "Core Training": "core_training",
-    "Cross Training": "cross_training",
-    "Kickboxing": "kickboxing",
-    "Martial Arts": "martial_arts",
+# Apple workout names vary ("Outdoor Run", "Pool Swim", ...); match by keyword.
+# Values match the spec's WORKOUT_CLASSES keys so each type deserializes into
+# the right Workout subclass on the consumer side.
+WORKOUT_TYPE_PATTERNS = {
+    "running": ("run",),
+    "cycling": ("cycl", "bike"),
+    "swimming": ("swim",),
+    "walking": ("walk",),
+    "hiking": ("hik",),
+    "snowboarding": ("snowboard",),
+    "downhill_skiing": ("ski",),
+    "strength": ("strength",),
+    "yoga": ("yoga",),
 }
 
-
-def _serialize(obj):
-    """Recursively convert attrs instances to dicts for JSON response."""
-    if attrs.has(type(obj)):
-        d = {}
-        for field in attrs.fields(type(obj)):
-            val = getattr(obj, field.name)
-            d[field.name] = _serialize(val)
-        return d
-    if isinstance(obj, list):
-        return [_serialize(v) for v in obj]
-    if isinstance(obj, datetime):
-        return obj.isoformat()
-    if isinstance(obj, dict):
-        return {k: _serialize(v) for k, v in obj.items()}
-    return obj
+# Types whose workouts carry distance/speed/elevation (spec: DistanceWorkout).
+DISTANCE_TYPES = {"running", "walking", "hiking", "cycling", "snowboarding", "downhill_skiing"}
+# Foot-based types that also report pace.
+PACE_TYPES = {"running", "walking", "hiking"}
 
 
-def _parse_ts(s: str) -> datetime:
-    """Best-effort parse of various timestamp formats to datetime."""
-    if not s:
-        return datetime.min.replace(tzinfo=timezone.utc)
-    try:
-        dt = datetime.fromisoformat(s)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except ValueError:
-        pass
-    # HAE format: "2026-05-27 08:16:53 -0700"
-    try:
-        return datetime.strptime(s, "%Y-%m-%d %H:%M:%S %z")
-    except ValueError:
-        return datetime.min.replace(tzinfo=timezone.utc)
+def _workout_type(name: str) -> str:
+    low = (name or "").lower()
+    for wtype, keys in WORKOUT_TYPE_PATTERNS.items():
+        if any(k in low for k in keys):
+            return wtype
+    return "other"
+
+
+def _to_meters(qty: float, units: str | None) -> float:
+    u = (units or "").lower()
+    if u in ("mi", "mile", "miles"):
+        return qty * 1609.344
+    if u == "km":
+        return qty * 1000.0
+    if u in ("yd", "yard", "yards"):
+        return qty * 0.9144
+    if u in ("ft", "foot", "feet"):
+        return qty * 0.3048
+    return qty  # already meters
+
+
+def _to_ms(qty: float, units: str | None) -> float:
+    u = (units or "").lower()
+    if u in ("mi", "mi/hr", "mph"):
+        return qty * 0.44704
+    if u in ("km/hr", "km/h", "kph"):
+        return qty / 3.6
+    return qty  # already m/s
+
+
+def _f_to_c(qty: float, units: str | None = None) -> float:
+    if (units or "").lower() in ("c", "degc", "°c"):
+        return qty
+    return (qty - 32.0) * 5.0 / 9.0
 
 
 @get("/api/v1/metrics")
 async def service_list_metrics() -> dict:
-    metrics: list[MetricType] = []
+    metrics = []
 
     async with db.connect() as conn:
         hr_exists = await (await conn.execute(
             "SELECT 1 FROM heart_rate LIMIT 1"
         )).fetchone()
         if hr_exists:
-            metrics.append(MetricType(
-                metric_id="heart_rate",
-                display_name="Heart Rate",
-                kind=MetricKind.TIME_SERIES,
-                unit="bpm",
-            ))
+            metrics.append({
+                "metric_id": "heart_rate",
+                "display_name": "Heart Rate",
+                "kind": "time_series",
+                "unit": "bpm",
+            })
 
         quantity_names = await (await conn.execute(
             "SELECT DISTINCT metric_name FROM metrics ORDER BY metric_name"
@@ -122,25 +97,25 @@ async def service_list_metrics() -> dict:
             unit_row = await (await conn.execute(
                 "SELECT units FROM metrics WHERE metric_name = ? LIMIT 1", (name,)
             )).fetchone()
-            metrics.append(MetricType(
-                metric_id=name,
-                display_name=name.replace("_", " ").title(),
-                kind=MetricKind.TIME_SERIES,
-                unit=unit_row[0] if unit_row else None,
-            ))
+            metrics.append({
+                "metric_id": name,
+                "display_name": name.replace("_", " ").title(),
+                "kind": "time_series",
+                "unit": unit_row[0] if unit_row else None,
+            })
 
         sleep_exists = await (await conn.execute(
             "SELECT 1 FROM sleep_analysis LIMIT 1"
         )).fetchone()
         if sleep_exists:
-            metrics.append(MetricType(
-                metric_id="sleep_analysis",
-                display_name="Sleep Analysis",
-                kind=MetricKind.TIME_SERIES,
-                unit=None,
-            ))
+            metrics.append({
+                "metric_id": "sleep_analysis",
+                "display_name": "Sleep Analysis",
+                "kind": "time_series",
+                "unit": None,
+            })
 
-    return {"metrics": [_serialize(m) for m in metrics]}
+    return {"metrics": metrics}
 
 
 @get("/api/v1/time-series")
@@ -154,69 +129,70 @@ async def service_get_time_series(request: Request) -> dict:
         return {"error": "metric parameter required"}
 
     if metric == "heart_rate":
-        ts = await _hr_time_series(start, end, limit)
-    else:
-        ts = await _quantity_time_series(metric, start, end, limit)
+        return await _hr_time_series(start, end, limit)
 
-    return _serialize(ts)
+    return await _quantity_time_series(metric, start, end, limit)
 
 
-async def _hr_time_series(start, end, limit) -> TimeSeries:
+async def _hr_time_series(start, end, limit) -> dict:
+    conditions = []
+    params: list = []
+    if start:
+        conditions.append("date >= ?")
+        params.append(start)
+    if end:
+        conditions.append("date <= ?")
+        params.append(end)
+    params.append(limit)
+
+    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     async with db.connect() as conn:
         rows = await (await conn.execute(
-            "SELECT date, avg_hr FROM heart_rate ORDER BY date",
+            f"SELECT date, avg_hr FROM heart_rate {where} ORDER BY date LIMIT ?",
+            params,
         )).fetchall()
 
-    start_dt = _parse_ts(start) if start else None
-    end_dt = _parse_ts(end) if end else None
-    samples: list[Sample] = []
-    for r in rows:
-        ts = _parse_ts(r[0])
-        if start_dt and ts < start_dt:
-            continue
-        if end_dt and ts > end_dt:
-            continue
-        samples.append(Sample(timestamp=ts, value=r[1]))
-        if len(samples) >= limit:
-            break
-
-    return TimeSeries(
-        metric_id="heart_rate",
-        display_name="Heart Rate",
-        unit="bpm",
-        source=SOURCE,
-        samples=samples,
-    )
+    return {
+        "metric_id": "heart_rate",
+        "display_name": "Heart Rate",
+        "unit": "bpm",
+        "source": "apple_health",
+        "samples": [
+            {"timestamp": r[0], "value": r[1]}
+            for r in rows
+        ],
+    }
 
 
-async def _quantity_time_series(metric, start, end, limit) -> TimeSeries:
+async def _quantity_time_series(metric, start, end, limit) -> dict:
+    conditions = ["metric_name = ?"]
+    params: list = [metric]
+    if start:
+        conditions.append("date >= ?")
+        params.append(start)
+    if end:
+        conditions.append("date <= ?")
+        params.append(end)
+    params.append(limit)
+
+    where = " AND ".join(conditions)
     async with db.connect() as conn:
         rows = await (await conn.execute(
-            "SELECT date, qty, units FROM metrics WHERE metric_name = ? ORDER BY date",
-            (metric,),
+            f"SELECT date, qty, units FROM metrics WHERE {where} ORDER BY date LIMIT ?",
+            params,
         )).fetchall()
 
-    start_dt = _parse_ts(start) if start else None
-    end_dt = _parse_ts(end) if end else None
     unit = rows[0][2] if rows else None
-    samples: list[Sample] = []
-    for r in rows:
-        ts = _parse_ts(r[0])
-        if start_dt and ts < start_dt:
-            continue
-        if end_dt and ts > end_dt:
-            continue
-        samples.append(Sample(timestamp=ts, value=r[1]))
-        if len(samples) >= limit:
-            break
-
-    return TimeSeries(
-        metric_id=metric,
-        display_name=metric.replace("_", " ").title(),
-        unit=unit,
-        source=SOURCE,
-        samples=samples,
-    )
+    return {
+        "metric_id": metric,
+        "display_name": metric.replace("_", " ").title(),
+        "unit": unit,
+        "source": "apple_health",
+        "samples": [
+            {"timestamp": r[0], "value": r[1]}
+            for r in rows
+        ],
+    }
 
 
 @get("/api/v1/sleep-sessions")
@@ -225,43 +201,110 @@ async def service_get_sleep_sessions(request: Request) -> dict:
     end = request.query_params.get("end")
     limit = int(request.query_params.get("limit", "100"))
 
-    start_dt = _parse_ts(start) if start else None
-    end_dt = _parse_ts(end) if end else None
+    conditions = []
+    params: list = []
+    if start:
+        conditions.append("date >= ?")
+        params.append(start)
+    if end:
+        conditions.append("date <= ?")
+        params.append(end)
+    params.append(limit)
 
+    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     async with db.connect() as conn:
         rows = await (await conn.execute(
-            "SELECT date, in_bed_start, in_bed_end, sleep_start, sleep_end,"
-            "       core, rem, deep, awake, in_bed, source"
-            " FROM sleep_analysis ORDER BY date DESC",
+            f"""SELECT date, in_bed_start, in_bed_end, sleep_start, sleep_end,
+                       core, rem, deep, awake, in_bed, source
+                FROM sleep_analysis {where} ORDER BY date DESC LIMIT ?""",
+            params,
         )).fetchall()
 
-    sessions: list[SleepSession] = []
+    def _scalar(metric_id, display_name, unit, value, source):
+        return {
+            "metric_id": metric_id,
+            "display_name": display_name,
+            "unit": unit,
+            "value": value,
+            "source": source,
+        }
+
+    sessions = []
     for r in reversed(rows):
-        row_dt = _parse_ts(r[0])
-        if start_dt and row_dt < start_dt:
+        source = r[10] or "apple_health"
+        session = {
+            "start": r[3] or r[1],
+            "end": r[4] or r[2],
+            "source": source,
+        }
+        if r[5] is not None and r[6] is not None and r[7] is not None:
+            total = r[5] + r[6] + r[7]
+            session["total_duration"] = _scalar("duration", "Duration", "min", total, source)
+            session["deep_sleep_duration"] = _scalar("duration", "Deep Sleep", "min", r[7], source)
+            session["light_sleep_duration"] = _scalar("duration", "Light Sleep", "min", r[5], source)
+            session["rem_sleep_duration"] = _scalar("duration", "REM Sleep", "min", r[6], source)
+        if r[8] is not None:
+            session["awake_time"] = _scalar("duration", "Awake Time", "min", r[8], source)
+        if r[9] is not None:
+            session["time_in_bed"] = _scalar("duration", "Time in Bed", "min", r[9], source)
+        sessions.append(session)
+
+    return {"count": len(sessions), "data": sessions}
+
+
+def _scalar(metric_id, display_name, unit, value):
+    return {
+        "metric_id": metric_id,
+        "display_name": display_name,
+        "unit": unit,
+        "value": value,
+        "source": SOURCE,
+    }
+
+
+# How to derive each spec field from a workout's stored scalars, grouped by the
+# Workout subclass that owns it.
+# (spec_field, scalar_name, metric_id, display_name, unit, converter)
+_BASE_SCALARS = [
+    ("calories", "activeEnergyBurned", "calories", "Calories", "kcal", None),
+    ("intensity", "intensity", "intensity", "Intensity", "kcal/hr·kg", None),
+    ("average_heart_rate", "avgHeartRate", "average_heart_rate", "Avg Heart Rate", "bpm", None),
+    ("max_heart_rate", "maxHeartRate", "max_heart_rate", "Max Heart Rate", "bpm", None),
+    ("lowest_heart_rate", "heartRateMin", "lowest_heart_rate", "Lowest Heart Rate", "bpm", None),
+    ("temperature", "temperature", "temperature", "Temperature", "°C", _f_to_c),
+    ("humidity", "humidity", "humidity", "Humidity", "%", None),
+]
+_DISTANCE_SCALARS = [
+    ("distance", "distance", "distance", "Distance", "m", _to_meters),
+    ("average_speed", "avgSpeed", "speed", "Avg Speed", "m/s", _to_ms),
+    ("max_speed", "maxSpeed", "speed", "Max Speed", "m/s", _to_ms),
+    ("elevation_gain", "elevationUp", "distance", "Elevation Gain", "m", _to_meters),
+    ("elevation_loss", "elevationDown", "distance", "Elevation Loss", "m", _to_meters),
+]
+_SWIM_SCALARS = [
+    ("distance", "distance", "distance", "Distance", "m", _to_meters),
+    ("average_speed", "avgSpeed", "speed", "Avg Speed", "m/s", _to_ms),
+    ("max_speed", "maxSpeed", "speed", "Max Speed", "m/s", _to_ms),
+    ("stroke_count", "totalSwimmingStrokeCount", "stroke_count", "Stroke Count", "count", None),
+    ("average_cadence", "swimCadence", "cadence", "Cadence", "count/min", None),
+    ("lap_length", "lapLength", "distance", "Lap Length", "m", _to_meters),
+]
+
+
+def _emit_scalars(w, fields, s):
+    """Add each present scalar field to workout dict w; return distance if set."""
+    distance_m = None
+    for field, sname, metric_id, display, unit, conv in fields:
+        if sname not in s:
             continue
-        if end_dt and row_dt > end_dt:
+        qty, units = s[sname]
+        if qty is None:
             continue
-
-        source = r[10] or SOURCE
-        core, rem, deep, awake, in_bed = r[5], r[6], r[7], r[8], r[9]
-        total = (core or 0) + (rem or 0) + (deep or 0)
-
-        sessions.append(SleepSession(
-            start=_parse_ts(r[3] or r[1]),
-            end=_parse_ts(r[4] or r[2]),
-            total_duration=Duration(value=total, source=source) if total else None,
-            deep_sleep_duration=Duration(value=deep, source=source, metric_id="duration", display_name="Deep Sleep") if deep is not None else None,
-            light_sleep_duration=Duration(value=core, source=source, metric_id="duration", display_name="Light Sleep") if core is not None else None,
-            rem_sleep_duration=Duration(value=rem, source=source, metric_id="duration", display_name="REM Sleep") if rem is not None else None,
-            awake_time=Duration(value=awake, source=source, metric_id="duration", display_name="Awake Time") if awake is not None else None,
-            time_in_bed=Duration(value=in_bed, source=source, metric_id="duration", display_name="Time in Bed") if in_bed is not None else None,
-            source=source,
-        ))
-        if len(sessions) >= limit:
-            break
-
-    return {"count": len(sessions), "data": [_serialize(s) for s in sessions]}
+        value = conv(qty, units) if conv else qty
+        w[field] = _scalar(metric_id, display, unit, value)
+        if field == "distance":
+            distance_m = value
+    return distance_m
 
 
 @get("/api/v1/workouts")
@@ -271,81 +314,100 @@ async def service_get_workouts(request: Request) -> dict:
     end = request.query_params.get("end")
     limit = int(request.query_params.get("limit", "100"))
 
-    start_dt = _parse_ts(start) if start else None
-    end_dt = _parse_ts(end) if end else None
-
     conditions = []
     params: list = []
     if workout_type:
-        names = [k for k, v in WORKOUT_TYPE_MAP.items() if v == workout_type]
-        if names:
-            placeholders = ",".join("?" * len(names))
-            conditions.append(f"name IN ({placeholders})")
-            params.extend(names)
+        keys = WORKOUT_TYPE_PATTERNS.get(workout_type)
+        if keys:
+            conditions.append("(" + " OR ".join("LOWER(name) LIKE ?" for _ in keys) + ")")
+            params.extend(f"%{k}%" for k in keys)
         else:
             conditions.append("name = ?")
             params.append(workout_type)
+    if start:
+        conditions.append("start_ts >= ?")
+        params.append(start)
+    if end:
+        conditions.append("start_ts <= ?")
+        params.append(end)
+    params.append(limit)
 
     where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     async with db.connect() as conn:
         rows = await (await conn.execute(
-            f"""SELECT workout_id, name, start_ts, end_ts, duration,
-                       active_energy_qty, active_energy_units,
-                       distance_qty, distance_units
-                FROM workouts {where} ORDER BY start_ts DESC""",
+            f"""SELECT workout_id, name, start_ts, end_ts, duration, is_indoor
+                FROM workouts {where} ORDER BY start_ts DESC LIMIT ?""",
             params,
         )).fetchall()
 
-        workouts: list[Workout] = []
-        for r in reversed(rows):
-            row_dt = _parse_ts(r[2])
-            if start_dt and row_dt < start_dt:
-                continue
-            if end_dt and row_dt > end_dt:
-                continue
+        ids = [r[0] for r in rows]
+        scalars: dict[str, dict[str, tuple]] = {}
+        routes: dict[str, str] = {}
+        hr_series: dict[str, list] = {}
+        if ids:
+            placeholders = ",".join("?" * len(ids))
+            srows = await (await conn.execute(
+                f"SELECT workout_id, name, qty, units FROM workout_scalars WHERE workout_id IN ({placeholders})",
+                ids,
+            )).fetchall()
+            for wid, name, qty, units in srows:
+                scalars.setdefault(wid, {})[name] = (qty, units)
 
-            wtype = WORKOUT_TYPE_MAP.get(r[1], r[1].lower() if r[1] else "other")
-            kwargs: dict = {
-                "workout_type": wtype,
-                "start": row_dt,
-                "end": _parse_ts(r[3]),
-                "source": SOURCE,
-                "id": r[0],
+            rrows = await (await conn.execute(
+                f"SELECT workout_id, gpx_gzip FROM workout_routes WHERE workout_id IN ({placeholders})",
+                ids,
+            )).fetchall()
+            for wid, blob in rrows:
+                routes[wid] = gzip.decompress(blob).decode()
+
+            hrows = await (await conn.execute(
+                f"""SELECT workout_id, date, avg_hr FROM workout_heart_rate
+                    WHERE series = 'heartRate' AND workout_id IN ({placeholders})
+                    ORDER BY date""",
+                ids,
+            )).fetchall()
+            for wid, date, avg in hrows:
+                hr_series.setdefault(wid, []).append({"timestamp": date, "value": avg})
+
+    workouts = []
+    for r in reversed(rows):
+        wid, name = r[0], r[1]
+        s = scalars.get(wid, {})
+        wtype = _workout_type(name)
+        w = {
+            "start": r[2],
+            "end": r[3],
+            "workout_type": wtype,
+            "source": SOURCE,
+            "id": wid,
+        }
+        if r[4] is not None:
+            w["duration"] = _scalar("duration", "Duration", "min", r[4] / 60.0)
+        if r[5] is not None:
+            w["is_indoor"] = bool(r[5])
+        if wid in hr_series:
+            w["heart_rate"] = {
+                "metric_id": "heart_rate", "display_name": "Heart Rate",
+                "unit": "bpm", "source": SOURCE, "samples": hr_series[wid],
             }
 
-            if r[4] is not None:
-                kwargs["duration"] = Duration(value=r[4] / 60.0, source=SOURCE)
-            if r[5] is not None:
-                kwargs["calories"] = Calories(value=r[5], source=SOURCE)
+        _emit_scalars(w, _BASE_SCALARS, s)
+        distance_m = None
+        if wtype == "swimming":
+            distance_m = _emit_scalars(w, _SWIM_SCALARS, s)
+        elif wtype in DISTANCE_TYPES:
+            distance_m = _emit_scalars(w, _DISTANCE_SCALARS, s)
 
-            hr_rows = await (await conn.execute(
-                "SELECT date, avg_hr FROM workout_heart_rate WHERE workout_id = ? ORDER BY date",
-                (r[0],),
-            )).fetchall()
-            if hr_rows:
-                kwargs["heart_rate"] = HeartRate(
-                    source=SOURCE,
-                    samples=[Sample(timestamp=_parse_ts(h[0]), value=h[1]) for h in hr_rows],
-                )
-                vals = [h[1] for h in hr_rows]
-                kwargs["average_heart_rate"] = HeartRateAvg(value=sum(vals) / len(vals), source=SOURCE)
-                kwargs["max_heart_rate"] = HeartRateAvg(
-                    value=max(vals), source=SOURCE,
-                    metric_id="max_heart_rate", display_name="Max Heart Rate",
-                )
+        # Pace, derived from distance + duration, for foot-based workouts.
+        if wtype in PACE_TYPES and distance_m and r[4]:
+            pace = r[4] / (distance_m / 1000.0)
+            w["average_pace"] = _scalar("pace", "Avg Pace", "s/km", pace)
 
-            route_rows = await (await conn.execute(
-                "SELECT timestamp, latitude, longitude, altitude FROM workout_route WHERE workout_id = ? ORDER BY timestamp",
-                (r[0],),
-            )).fetchall()
-            if route_rows:
-                kwargs["route"] = [
-                    RoutePoint(timestamp=_parse_ts(p[0]), lat=p[1], lon=p[2], altitude=p[3])
-                    for p in route_rows
-                ]
+        # GPS route as a GPX document (route_gpx lives on the route-capable
+        # subclasses: DistanceWorkout and SwimmingWorkout).
+        if (wtype == "swimming" or wtype in DISTANCE_TYPES) and wid in routes:
+            w["route_gpx"] = routes[wid]
 
-            workouts.append(Workout(**kwargs))
-            if len(workouts) >= limit:
-                break
+        workouts.append(w)
 
-    return {"count": len(workouts), "data": [_serialize(w) for w in workouts]}
+    return {"count": len(workouts), "data": workouts}

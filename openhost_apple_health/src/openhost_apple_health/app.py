@@ -1,5 +1,8 @@
+import asyncio
+import gzip
 import logging
 import os
+import uuid
 from pathlib import Path
 
 from litestar import Litestar, Request, get, post
@@ -7,6 +10,7 @@ from litestar.response import Response
 
 from . import db
 from .ingest import ingest_payload
+from .manual_import import process_import
 from .service import (
     service_list_metrics,
     service_get_time_series,
@@ -18,6 +22,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger(__name__)
 
 WRITE_TOKEN = os.environ.get("HAE_WRITE_TOKEN", "sk-hae-a7x9mQ3vR2p")
+
+# Uploaded zips are streamed here (same volume as the DB) then deleted.
+UPLOAD_DIR = os.path.dirname(os.path.abspath(db.DB_PATH)) or "."
+UPLOAD_CHUNK_FIELDS = (
+    "id", "filename", "status", "total_workouts", "processed_workouts",
+    "total_metrics", "processed_metrics", "error", "created_at", "updated_at",
+)
 
 
 @get("/health")
@@ -71,6 +82,65 @@ async def ingest_data(request: Request) -> Response:
             content={"error": "Failed to process request"},
             status_code=500,
         )
+
+
+@post("/api/import", request_max_body_size=None)
+async def import_upload(request: Request) -> Response:
+    """Stream a Health Auto Export zip to disk and process it in the background."""
+    if request.headers.get("api-key", "") != WRITE_TOKEN:
+        return Response(content={"error": "Unauthorized"}, status_code=401)
+
+    job_id = uuid.uuid4().hex
+    filename = request.headers.get("x-filename") or "upload.zip"
+    zip_path = os.path.join(UPLOAD_DIR, f"import-{job_id}.zip")
+
+    size = 0
+    try:
+        with open(zip_path, "wb") as f:
+            async for chunk in request.stream():
+                f.write(chunk)
+                size += len(chunk)
+    except Exception:
+        log.exception("Upload failed for job %s", job_id)
+        try:
+            os.remove(zip_path)
+        except OSError:
+            pass
+        return Response(content={"error": "Upload failed"}, status_code=500)
+
+    log.info("Received manual import %s (%s, %d bytes)", job_id, filename, size)
+    async with db.connect() as conn:
+        await conn.execute(
+            "INSERT INTO import_jobs (id, filename, status) VALUES (?, ?, 'processing')",
+            (job_id, filename),
+        )
+        await conn.commit()
+
+    asyncio.create_task(process_import(job_id, zip_path))
+    return Response(content={"job_id": job_id}, status_code=202)
+
+
+@get("/api/import/{job_id:str}")
+async def import_status(job_id: str) -> Response:
+    cols = ", ".join(UPLOAD_CHUNK_FIELDS)
+    async with db.connect() as conn:
+        row = await (await conn.execute(
+            f"SELECT {cols} FROM import_jobs WHERE id = ?", (job_id,)
+        )).fetchone()
+    if not row:
+        return Response(content={"error": "not found"}, status_code=404)
+    return Response(content=dict(row))
+
+
+@get("/workouts/{workout_id:str}/route.gpx")
+async def workout_route(workout_id: str) -> Response:
+    async with db.connect() as conn:
+        row = await (await conn.execute(
+            "SELECT gpx_gzip FROM workout_routes WHERE workout_id = ?", (workout_id,)
+        )).fetchone()
+    if not row:
+        return Response(content={"error": "not found"}, status_code=404)
+    return Response(content=gzip.decompress(row[0]), media_type="application/gpx+xml")
 
 
 @get("/")
@@ -161,6 +231,7 @@ DASHBOARD_HTML = (_TEMPLATES / "dashboard.html").read_text()
 app = Litestar(
     route_handlers=[
         health_check, index, ingest_data,
+        import_upload, import_status, workout_route,
         get_heart_rate, get_stats,
         service_list_metrics, service_get_time_series,
         service_get_sleep_sessions, service_get_workouts,

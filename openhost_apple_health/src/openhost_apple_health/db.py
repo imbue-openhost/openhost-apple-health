@@ -58,7 +58,9 @@ CREATE TABLE IF NOT EXISTS workouts (
     active_energy_qty REAL,
     active_energy_units TEXT,
     distance_qty REAL,
-    distance_units TEXT
+    distance_units TEXT,
+    is_indoor INTEGER,
+    location TEXT
 );
 
 CREATE TABLE IF NOT EXISTS workout_heart_rate (
@@ -69,18 +71,48 @@ CREATE TABLE IF NOT EXISTS workout_heart_rate (
     avg_hr REAL NOT NULL,
     max_hr REAL NOT NULL,
     units TEXT NOT NULL,
-    source TEXT NOT NULL
+    source TEXT NOT NULL,
+    series TEXT NOT NULL DEFAULT 'heartRate'
 );
 
-CREATE TABLE IF NOT EXISTS workout_route (
+-- Summary scalar fields per workout (every {qty, units} field, generically).
+CREATE TABLE IF NOT EXISTS workout_scalars (
+    workout_id TEXT NOT NULL REFERENCES workouts(workout_id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    qty REAL,
+    units TEXT,
+    UNIQUE(workout_id, name)
+);
+
+-- Per-minute quantity time series per workout (activeEnergy, stepCount, etc).
+CREATE TABLE IF NOT EXISTS workout_time_series (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     workout_id TEXT NOT NULL REFERENCES workouts(workout_id) ON DELETE CASCADE,
-    timestamp TEXT NOT NULL,
-    latitude REAL NOT NULL,
-    longitude REAL NOT NULL,
-    altitude REAL,
-    speed REAL,
-    course REAL
+    series_name TEXT NOT NULL,
+    date TEXT NOT NULL,
+    qty REAL,
+    units TEXT,
+    source TEXT
+);
+
+-- GPS route stored as a gzipped GPX document, one per workout.
+CREATE TABLE IF NOT EXISTS workout_routes (
+    workout_id TEXT PRIMARY KEY REFERENCES workouts(workout_id) ON DELETE CASCADE,
+    point_count INTEGER NOT NULL,
+    gpx_gzip BLOB NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS import_jobs (
+    id TEXT PRIMARY KEY,
+    filename TEXT,
+    status TEXT NOT NULL,
+    total_workouts INTEGER DEFAULT 0,
+    processed_workouts INTEGER DEFAULT 0,
+    total_metrics INTEGER DEFAULT 0,
+    processed_metrics INTEGER DEFAULT 0,
+    error TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
 CREATE TABLE IF NOT EXISTS raw_payloads (
@@ -96,14 +128,31 @@ CREATE INDEX IF NOT EXISTS idx_heart_rate_date ON heart_rate(date);
 CREATE INDEX IF NOT EXISTS idx_sleep_date ON sleep_analysis(date);
 CREATE INDEX IF NOT EXISTS idx_workouts_start ON workouts(start_ts);
 CREATE INDEX IF NOT EXISTS idx_workout_hr_wid ON workout_heart_rate(workout_id);
-CREATE INDEX IF NOT EXISTS idx_workout_route_wid ON workout_route(workout_id);
+CREATE INDEX IF NOT EXISTS idx_workout_scalars_wid ON workout_scalars(workout_id);
+CREATE INDEX IF NOT EXISTS idx_workout_ts_wid ON workout_time_series(workout_id);
 """
+
+# Columns added to pre-existing tables. CREATE TABLE IF NOT EXISTS won't alter
+# an already-created table, so add them explicitly if missing.
+MIGRATIONS = [
+    ("workouts", "is_indoor", "INTEGER"),
+    ("workouts", "location", "TEXT"),
+    ("workout_heart_rate", "series", "TEXT NOT NULL DEFAULT 'heartRate'"),
+]
 
 
 async def init_db():
     async with connect() as db:
         await db.executescript(SCHEMA)
+        await _migrate(db)
         await db.commit()
+
+
+async def _migrate(db):
+    for table, column, decl in MIGRATIONS:
+        cols = await (await db.execute(f"PRAGMA table_info({table})")).fetchall()
+        if column not in {c[1] for c in cols}:
+            await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 @asynccontextmanager
