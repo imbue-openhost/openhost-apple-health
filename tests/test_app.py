@@ -1,15 +1,16 @@
-import io
 import json
 import time
-import zipfile
 
 import httpx
 
-API_KEY = "sk-hae-a7x9mQ3vR2p"
+
+def _api_key(stack) -> str:
+    """The app generates the write token on first boot; read it back via settings."""
+    return httpx.get(f"{stack.url}/api/v1/settings").json()["api_key"]
 
 
-def _export_zip() -> bytes:
-    """A minimal Health Auto Export zip: one workout with a 2-point route."""
+def _export_json() -> bytes:
+    """A minimal Health Auto Export JSON: one workout with a 2-point route."""
     payload = {
         "data": {
             "workouts": [
@@ -55,10 +56,7 @@ def _export_zip() -> bytes:
             ]
         }
     }
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("HealthAutoExport-2026.json", json.dumps(payload))
-    return buf.getvalue()
+    return json.dumps(payload).encode("utf-8")
 
 
 def test_health(stack):
@@ -76,6 +74,14 @@ def test_index_serves_html(stack):
 def test_ingest_requires_auth(stack):
     r = httpx.post(f"{stack.url}/api/data", json={"data": {}})
     assert r.status_code == 401
+
+
+def test_settings(stack):
+    r = httpx.get(f"{stack.url}/api/v1/settings")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["api_key"].startswith("sk-hae-")
+    assert body["upload_url"].endswith("/api/data")
 
 
 def test_ingest_metrics(stack):
@@ -103,7 +109,7 @@ def test_ingest_metrics(stack):
     r = httpx.post(
         f"{stack.url}/api/data",
         json=payload,
-        headers={"api-key": "sk-hae-a7x9mQ3vR2p"},
+        headers={"api-key": _api_key(stack)},
     )
     assert r.status_code == 200
     body = r.json()
@@ -175,7 +181,7 @@ def test_ingest_workouts(stack):
     r = httpx.post(
         f"{stack.url}/api/data",
         json=payload,
-        headers={"api-key": "sk-hae-a7x9mQ3vR2p"},
+        headers={"api-key": _api_key(stack)},
     )
     assert r.status_code == 200
     assert r.json()["workouts"]["success"] is True
@@ -203,16 +209,11 @@ def test_service_sleep_sessions(stack):
     assert "data" in body
 
 
-def test_import_requires_auth(stack):
-    r = httpx.post(f"{stack.url}/api/import", content=b"not-a-zip")
-    assert r.status_code == 401
-
-
 def test_manual_import(stack):
     r = httpx.post(
         f"{stack.url}/api/import",
-        content=_export_zip(),
-        headers={"api-key": API_KEY, "x-filename": "export.zip"},
+        content=_export_json(),
+        headers={"x-filename": "export.json"},
     )
     assert r.status_code == 202
     job_id = r.json()["job_id"]
@@ -250,8 +251,7 @@ def test_manual_import_reimport_is_idempotent(stack):
     before = httpx.get(f"{stack.url}/workouts/manual-1/route.gpx").text.count("<trkpt")
     r = httpx.post(
         f"{stack.url}/api/import",
-        content=_export_zip(),
-        headers={"api-key": API_KEY},
+        content=_export_json(),
     )
     assert r.status_code == 202
     job_id = r.json()["job_id"]

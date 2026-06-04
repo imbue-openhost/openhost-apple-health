@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apple Health — Settings</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+         background: #0f172a; color: #e2e8f0; padding: 1.5rem; max-width: 760px; }
+  .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; }
+  h1 { font-size: 1.5rem; }
+  .nav-link { color: #94a3b8; text-decoration: none; font-size: 0.85rem; border: 1px solid #334155;
+              border-radius: 6px; padding: 0.35rem 0.75rem; }
+  .nav-link:hover { color: #e2e8f0; border-color: #6366f1; }
+  .card { background: #1e293b; border-radius: 12px; padding: 1.25rem; margin-bottom: 1rem; }
+  .card h2 { font-size: 1rem; color: #94a3b8; margin-bottom: 0.5rem; }
+  .card p { font-size: 0.85rem; color: #94a3b8; margin-bottom: 0.75rem; line-height: 1.4; }
+  .field { display: flex; gap: 0.5rem; align-items: center; }
+  .field code { flex: 1; background: #0f172a; border: 1px solid #334155; border-radius: 6px;
+                padding: 0.5rem 0.75rem; font-size: 0.85rem; word-break: break-all; user-select: all; }
+  .copy { padding: 0.5rem 0.9rem; border-radius: 6px; border: none; background: #6366f1;
+          color: #fff; font-size: 0.8rem; cursor: pointer; white-space: nowrap; }
+  .copy:hover { background: #4f46e5; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Settings</h1>
+  <a class="nav-link" href="/">← Dashboard</a>
+</div>
+
+<div class="card">
+  <h2>Automated upload URL</h2>
+  <p>Set this as the REST API endpoint in the Health Auto Export app.</p>
+  <div class="field">
+    <code id="uploadUrl">…</code>
+    <button class="copy" data-target="uploadUrl">Copy</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>API key</h2>
+  <p>Send this as the <code style="padding:0 0.2rem">api-key</code> header with automated
+     uploads. Generated automatically; keep it secret.</p>
+  <div class="field">
+    <code id="apiKey">…</code>
+    <button class="copy" data-target="apiKey">Copy</button>
+  </div>
+</div>
+
+<script>
+async function load() {
+  const s = await (await fetch('/api/v1/settings')).json();
+  document.getElementById('uploadUrl').textContent = s.upload_url;
+  document.getElementById('apiKey').textContent = s.api_key;
+}
+
+document.querySelectorAll('.copy').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const text = document.getElementById(btn.dataset.target).textContent;
+    try { await navigator.clipboard.writeText(text); } catch (e) {}
+    const old = btn.textContent;
+    btn.textContent = 'Copied';
+    setTimeout(() => { btn.textContent = old; }, 1200);
+  });
+});
+
+load();
+</script>
+</body>
+</html>

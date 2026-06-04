@@ -1,8 +1,11 @@
 import os
+import secrets
 import aiosqlite
 from contextlib import asynccontextmanager
 
 DB_PATH = os.environ.get("OPENHOST_SQLITE_HEALTH", "health.db")
+
+WRITE_TOKEN_KEY = "write_token"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS config (
@@ -181,3 +184,12 @@ async def set_config(key: str, value: str):
             (key, value),
         )
         await db.commit()
+
+
+async def ensure_write_token() -> str:
+    """Return the upload write token, generating and persisting one on first call."""
+    token = await get_config(WRITE_TOKEN_KEY)
+    if token is None:
+        token = "sk-hae-" + secrets.token_urlsafe(24)
+        await set_config(WRITE_TOKEN_KEY, token)
+    return token

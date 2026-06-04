@@ -28,9 +28,8 @@
   .range-btn.active { background: #6366f1; color: white; border-color: #6366f1; }
   .upload { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center;
             background: #1e293b; border-radius: 10px; padding: 0.75rem 1rem; margin-bottom: 1.5rem; }
-  .upload input[type=password], .upload input[type=file] { background: #0f172a; color: #e2e8f0;
+  .upload input[type=file] { background: #0f172a; color: #e2e8f0;
             border: 1px solid #334155; border-radius: 6px; padding: 0.35rem 0.5rem; font-size: 0.8rem; }
-  .upload input[type=password] { width: 130px; }
   .upload button { padding: 0.4rem 0.9rem; border-radius: 6px; border: none;
             background: #6366f1; color: #fff; font-size: 0.8rem; cursor: pointer; }
   .upload button:disabled { opacity: 0.5; cursor: default; }
@@ -38,16 +37,19 @@
   .progress { display: none; flex-basis: 100%; height: 6px; background: #0f172a;
               border-radius: 3px; overflow: hidden; margin-top: 0.25rem; }
   .progress .bar { height: 100%; width: 0; background: #10b981; transition: width 0.3s; }
+  .nav-link { color: #94a3b8; text-decoration: none; font-size: 0.85rem; border: 1px solid #334155;
+              border-radius: 6px; padding: 0.35rem 0.75rem; }
+  .nav-link:hover { color: #e2e8f0; border-color: #6366f1; }
 </style>
 </head>
 <body>
 <div class="header">
   <h1>Apple Health</h1>
+  <a class="nav-link" href="/settings">Settings</a>
 </div>
 
 <div class="upload">
-  <input type="password" id="apiKey" placeholder="API key">
-  <input type="file" id="importFile" accept=".zip">
+  <input type="file" id="importFile" accept=".json,application/json">
   <button id="importBtn">Upload manual export</button>
   <span class="import-status" id="importStatus"></span>
   <div class="progress" id="importProgress"><div class="bar" id="importBar"></div></div>
@@ -180,23 +182,17 @@ document.querySelectorAll('.range-btn').forEach(btn => {
 load(7);
 
 // --- Manual import upload ---
-const apiKeyInput = document.getElementById('apiKey');
 const importBtn = document.getElementById('importBtn');
 const importFile = document.getElementById('importFile');
 const importStatusEl = document.getElementById('importStatus');
 const importProgress = document.getElementById('importProgress');
 const importBar = document.getElementById('importBar');
 
-apiKeyInput.value = localStorage.getItem('hae_api_key') || '';
-apiKeyInput.addEventListener('change', () => localStorage.setItem('hae_api_key', apiKeyInput.value));
-
 function setBar(pct) { importProgress.style.display = 'block'; importBar.style.width = pct + '%'; }
 
 importBtn.addEventListener('click', () => {
   const file = importFile.files[0];
-  if (!file) { importStatusEl.textContent = 'Choose a .zip file first'; return; }
-  const key = apiKeyInput.value.trim();
-  if (!key) { importStatusEl.textContent = 'Enter your API key'; return; }
+  if (!file) { importStatusEl.textContent = 'Choose a .json file first'; return; }
 
   importBtn.disabled = true;
   importStatusEl.textContent = 'Uploading…';
@@ -204,7 +200,6 @@ importBtn.addEventListener('click', () => {
 
   const xhr = new XMLHttpRequest();
   xhr.open('POST', '/api/import');
-  xhr.setRequestHeader('api-key', key);
   xhr.setRequestHeader('x-filename', file.name);
   // Upload spans 0-50% of the bar; processing fills the rest.
   xhr.upload.onprogress = (e) => { if (e.lengthComputable) setBar(Math.round(e.loaded / e.total * 50)); };

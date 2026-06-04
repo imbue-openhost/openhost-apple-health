@@ -21,9 +21,7 @@ from .service import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger(__name__)
 
-WRITE_TOKEN = os.environ.get("HAE_WRITE_TOKEN", "sk-hae-a7x9mQ3vR2p")
-
-# Uploaded zips are streamed here (same volume as the DB) then deleted.
+# Uploaded files are streamed here (same volume as the DB) then deleted.
 UPLOAD_DIR = os.path.dirname(os.path.abspath(db.DB_PATH)) or "."
 UPLOAD_CHUNK_FIELDS = (
     "id", "filename", "status", "total_workouts", "processed_workouts",
@@ -39,7 +37,7 @@ async def health_check() -> dict:
 @post("/api/data")
 async def ingest_data(request: Request) -> Response:
     token = request.headers.get("api-key", "")
-    if token != WRITE_TOKEN:
+    if token != await db.ensure_write_token():
         log.warning("Unauthorized ingest attempt from %s", request.client.host if request.client else "unknown")
         return Response(content={"error": "Unauthorized"}, status_code=401)
 
@@ -86,24 +84,25 @@ async def ingest_data(request: Request) -> Response:
 
 @post("/api/import", request_max_body_size=None)
 async def import_upload(request: Request) -> Response:
-    """Stream a Health Auto Export zip to disk and process it in the background."""
-    if request.headers.get("api-key", "") != WRITE_TOKEN:
-        return Response(content={"error": "Unauthorized"}, status_code=401)
+    """Stream a Health Auto Export JSON export to disk and process it in the background.
 
+    Owner-only: this route is not in the manifest's public_paths, so the router
+    requires the compute space owner to be logged in.
+    """
     job_id = uuid.uuid4().hex
-    filename = request.headers.get("x-filename") or "upload.zip"
-    zip_path = os.path.join(UPLOAD_DIR, f"import-{job_id}.zip")
+    filename = request.headers.get("x-filename") or "upload.json"
+    json_path = os.path.join(UPLOAD_DIR, f"import-{job_id}.json")
 
     size = 0
     try:
-        with open(zip_path, "wb") as f:
+        with open(json_path, "wb") as f:
             async for chunk in request.stream():
                 f.write(chunk)
                 size += len(chunk)
     except Exception:
         log.exception("Upload failed for job %s", job_id)
         try:
-            os.remove(zip_path)
+            os.remove(json_path)
         except OSError:
             pass
         return Response(content={"error": "Upload failed"}, status_code=500)
@@ -116,7 +115,7 @@ async def import_upload(request: Request) -> Response:
         )
         await conn.commit()
 
-    asyncio.create_task(process_import(job_id, zip_path))
+    asyncio.create_task(process_import(job_id, json_path))
     return Response(content={"job_id": job_id}, status_code=202)
 
 
@@ -146,6 +145,22 @@ async def workout_route(workout_id: str) -> Response:
 @get("/")
 async def index() -> Response:
     return Response(content=DASHBOARD_HTML, media_type="text/html")
+
+
+@get("/settings")
+async def settings_page() -> Response:
+    return Response(content=SETTINGS_HTML, media_type="text/html")
+
+
+@get("/api/v1/settings")
+async def get_settings() -> dict:
+    app_name = os.environ.get("OPENHOST_APP_NAME", "apple-health")
+    zone = os.environ.get("OPENHOST_ZONE_DOMAIN")
+    upload_url = f"https://{app_name}.{zone}/api/data" if zone else "/api/data"
+    return {
+        "api_key": await db.ensure_write_token(),
+        "upload_url": upload_url,
+    }
 
 
 @get("/api/v1/heart-rate")
@@ -221,16 +236,18 @@ async def get_stats() -> dict:
 
 async def on_startup() -> None:
     await db.init_db()
+    await db.ensure_write_token()
     log.info("Database initialized, ready to receive data")
 
 
 _TEMPLATES = Path(__file__).parent / "templates"
 DASHBOARD_HTML = (_TEMPLATES / "dashboard.html").read_text()
+SETTINGS_HTML = (_TEMPLATES / "settings.html").read_text()
 
 
 app = Litestar(
     route_handlers=[
-        health_check, index, ingest_data,
+        health_check, index, settings_page, get_settings, ingest_data,
         import_upload, import_status, workout_route,
         get_heart_rate, get_stats,
         service_list_metrics, service_get_time_series,
