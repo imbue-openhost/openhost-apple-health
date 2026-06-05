@@ -1,5 +1,7 @@
+import io
 import json
 import time
+import zipfile
 
 import httpx
 
@@ -9,13 +11,13 @@ def _api_key(stack) -> str:
     return httpx.get(f"{stack.url}/api/v1/settings").json()["api_key"]
 
 
-def _export_json() -> bytes:
-    """A minimal Health Auto Export JSON: one workout with a 2-point route."""
+def _export_payload(workout_id: str = "manual-1") -> dict:
+    """A minimal Health Auto Export payload: one workout with a 2-point route."""
     payload = {
         "data": {
             "workouts": [
                 {
-                    "id": "manual-1",
+                    "id": workout_id,
                     "name": "Outdoor Run",
                     "start": "2026-03-06 10:15:06 -0800",
                     "end": "2026-03-06 10:26:56 -0800",
@@ -56,7 +58,18 @@ def _export_json() -> bytes:
             ]
         }
     }
-    return json.dumps(payload).encode("utf-8")
+    return payload
+
+
+def _export_zip(workout_id: str = "manual-1") -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("HealthAutoExport-2026.json", json.dumps(_export_payload(workout_id)))
+    return buf.getvalue()
+
+
+def _export_json(workout_id: str = "manual-1") -> bytes:
+    return json.dumps(_export_payload(workout_id)).encode("utf-8")
 
 
 def test_health(stack):
@@ -212,8 +225,8 @@ def test_service_sleep_sessions(stack):
 def test_manual_import(stack):
     r = httpx.post(
         f"{stack.url}/api/import",
-        content=_export_json(),
-        headers={"x-filename": "export.json"},
+        content=_export_zip(),
+        headers={"x-filename": "export.zip"},
     )
     assert r.status_code == 202
     job_id = r.json()["job_id"]
@@ -251,7 +264,7 @@ def test_manual_import_reimport_is_idempotent(stack):
     before = httpx.get(f"{stack.url}/workouts/manual-1/route.gpx").text.count("<trkpt")
     r = httpx.post(
         f"{stack.url}/api/import",
-        content=_export_json(),
+        content=_export_zip(),
     )
     assert r.status_code == 202
     job_id = r.json()["job_id"]
@@ -263,3 +276,27 @@ def test_manual_import_reimport_is_idempotent(stack):
     assert status["status"] == "done", status
     after = httpx.get(f"{stack.url}/workouts/manual-1/route.gpx").text.count("<trkpt")
     assert after == before == 2
+
+
+def test_manual_import_plain_json(stack):
+    """A plain .json export (no zip wrapper) is accepted too, route and all."""
+    r = httpx.post(
+        f"{stack.url}/api/import",
+        content=_export_json("manual-json-1"),
+        headers={"x-filename": "export.json"},
+    )
+    assert r.status_code == 202
+    job_id = r.json()["job_id"]
+
+    status = {}
+    for _ in range(100):
+        status = httpx.get(f"{stack.url}/api/import/{job_id}").json()
+        if status["status"] in ("done", "error"):
+            break
+        time.sleep(0.2)
+    assert status["status"] == "done", status
+    assert status["processed_workouts"] == 1
+
+    g = httpx.get(f"{stack.url}/workouts/manual-json-1/route.gpx")
+    assert g.status_code == 200
+    assert g.text.count("<trkpt") == 2

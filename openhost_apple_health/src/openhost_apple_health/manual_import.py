@@ -1,14 +1,18 @@
-"""Manual import: process a Health Auto Export JSON export without holding it in memory.
+"""Manual import: process a Health Auto Export without holding it in memory.
 
-The export is one large ``HealthAutoExport-*.json``. Each workout's GPS route
-lives in its JSON ``route`` field, from which we regenerate GPX. The file is
-stream-parsed with ijson so a multi-hundred-MB file fits in a 256-512MB container.
+The upload is either a plain ``HealthAutoExport-*.json`` or a zip wrapping that
+JSON alongside per-workout GPX files. Either way we read only the JSON and
+regenerate GPX from each workout's ``route`` field (a strict superset of the
+bundled GPX). The JSON is stream-parsed with ijson so a 600MB file fits in a
+256-512MB container.
 """
 
 import asyncio
 import gzip
 import logging
 import os
+import zipfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from xml.sax.saxutils import escape, quoteattr
 
@@ -76,6 +80,30 @@ def route_to_gpx(name: str, points: list[dict]) -> bytes:
     return gzip.compress("".join(parts).encode("utf-8"))
 
 
+def _find_json_member(zf: zipfile.ZipFile) -> str | None:
+    candidates = [n for n in zf.namelist() if n.lower().endswith(".json")]
+    if not candidates:
+        return None
+    # The export's data file is the largest .json member.
+    return max(candidates, key=lambda n: zf.getinfo(n).file_size)
+
+
+@contextmanager
+def _open_export(path: str):
+    """Yield a binary stream of the export JSON, whether ``path`` is a plain
+    JSON file or a zip wrapping one. Detected by content, not extension."""
+    if zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path) as zf:
+            member = _find_json_member(zf)
+            if member is None:
+                raise ValueError("No JSON data file found in zip")
+            with zf.open(member) as f:
+                yield f
+    else:
+        with open(path, "rb") as f:
+            yield f
+
+
 async def _update_job(conn, job_id: str, **fields) -> None:
     fields["updated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     cols = ", ".join(f"{k} = ?" for k in fields)
@@ -86,10 +114,10 @@ async def _update_job(conn, job_id: str, **fields) -> None:
     await conn.commit()
 
 
-def _count_items(json_path: str) -> tuple[int, int]:
+def _count_items(path: str) -> tuple[int, int]:
     """Stream-count workouts and metric groups without building objects."""
     workouts = metrics = 0
-    with open(json_path, "rb") as f:
+    with _open_export(path) as f:
         for prefix, event, _ in ijson.parse(f):
             if event != "start_map":
                 continue
@@ -100,19 +128,19 @@ def _count_items(json_path: str) -> tuple[int, int]:
     return workouts, metrics
 
 
-async def process_import(job_id: str, json_path: str) -> None:
-    """Parse the uploaded JSON export and ingest it, updating the import_jobs row."""
+async def process_import(job_id: str, path: str) -> None:
+    """Parse the uploaded export (zip or JSON) and ingest it, updating the import_jobs row."""
     from . import ingest  # lazy: ingest imports route_to_gpx from this module
 
     try:
-        total_w, total_m = await asyncio.to_thread(_count_items, json_path)
+        total_w, total_m = await asyncio.to_thread(_count_items, path)
         async with db.connect() as conn:
             await _update_job(conn, job_id, status="processing",
                               total_workouts=total_w, total_metrics=total_m)
 
         processed_w = 0
         async with db.connect() as conn:
-            with open(json_path, "rb") as f:
+            with _open_export(path) as f:
                 for w in ijson.items(f, "data.workouts.item", use_float=True):
                     await ingest.save_workout(conn, w)
                     processed_w += 1
@@ -125,7 +153,7 @@ async def process_import(job_id: str, json_path: str) -> None:
         processed_m = 0
         if total_m:
             async with db.connect() as conn:
-                with open(json_path, "rb") as f:
+                with _open_export(path) as f:
                     for group in ijson.items(f, "data.metrics.item", use_float=True):
                         await ingest.save_metric_group(conn, group)
                         processed_m += 1
@@ -145,6 +173,6 @@ async def process_import(job_id: str, json_path: str) -> None:
             await _update_job(conn, job_id, status="error", error=str(e))
     finally:
         try:
-            os.remove(json_path)
+            os.remove(path)
         except OSError:
             pass

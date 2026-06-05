@@ -84,25 +84,26 @@ async def ingest_data(request: Request) -> Response:
 
 @post("/api/import", request_max_body_size=None)
 async def import_upload(request: Request) -> Response:
-    """Stream a Health Auto Export JSON export to disk and process it in the background.
+    """Stream a Health Auto Export (zip or plain JSON) to disk and process it in the background.
 
     Owner-only: this route is not in the manifest's public_paths, so the router
-    requires the compute space owner to be logged in.
+    requires the compute space owner to be logged in. The export format is
+    detected from content, not the filename.
     """
     job_id = uuid.uuid4().hex
-    filename = request.headers.get("x-filename") or "upload.json"
-    json_path = os.path.join(UPLOAD_DIR, f"import-{job_id}.json")
+    filename = request.headers.get("x-filename") or "upload"
+    data_path = os.path.join(UPLOAD_DIR, f"import-{job_id}.data")
 
     size = 0
     try:
-        with open(json_path, "wb") as f:
+        with open(data_path, "wb") as f:
             async for chunk in request.stream():
                 f.write(chunk)
                 size += len(chunk)
     except Exception:
         log.exception("Upload failed for job %s", job_id)
         try:
-            os.remove(json_path)
+            os.remove(data_path)
         except OSError:
             pass
         return Response(content={"error": "Upload failed"}, status_code=500)
@@ -115,7 +116,7 @@ async def import_upload(request: Request) -> Response:
         )
         await conn.commit()
 
-    asyncio.create_task(process_import(job_id, json_path))
+    asyncio.create_task(process_import(job_id, data_path))
     return Response(content={"job_id": job_id}, status_code=202)
 
 

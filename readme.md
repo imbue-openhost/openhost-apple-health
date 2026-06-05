@@ -10,7 +10,9 @@ manual import:
   - date range all
   - format JSON
   - v2
-  - select only workouts. don't include GPX (route data is already in the JSON), do include metrics.
+  - select only workouts.
+  - include GPX (this will include gpx files but also populates the route data into the JSON, which is what we use)
+  - include metrics.
   - time grouping to minutes (export is waaay slower if you set to seconds).
   - this completes for me in a couple mins for several hundred workouts
-  - upload the resulting .json on the dashboard. i synced it to my laptop via airdrop.
+  - upload the resulting .zip on the dashboard. i synced it to my laptop via airdrop.

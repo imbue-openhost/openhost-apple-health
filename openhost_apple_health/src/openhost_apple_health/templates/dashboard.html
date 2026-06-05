@@ -49,7 +49,7 @@
 </div>
 
 <div class="upload">
-  <input type="file" id="importFile" accept=".json,application/json">
+  <input type="file" id="importFile" accept=".zip,.json,application/json">
   <button id="importBtn">Upload manual export</button>
   <span class="import-status" id="importStatus"></span>
   <div class="progress" id="importProgress"><div class="bar" id="importBar"></div></div>
@@ -192,7 +192,7 @@ function setBar(pct) { importProgress.style.display = 'block'; importBar.style.w
 
 importBtn.addEventListener('click', () => {
   const file = importFile.files[0];
-  if (!file) { importStatusEl.textContent = 'Choose a .json file first'; return; }
+  if (!file) { importStatusEl.textContent = 'Choose a .zip or .json file first'; return; }
 
   importBtn.disabled = true;
   importStatusEl.textContent = 'Uploading…';
