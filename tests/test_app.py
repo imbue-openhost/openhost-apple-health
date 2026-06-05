@@ -213,6 +213,24 @@ def test_service_workouts(stack):
     # distance was ingested in km and is exposed in meters per the spec.
     assert w["distance"]["unit"] == "m"
     assert abs(w["distance"]["value"] - 5.2 * 1000) < 1
+    # The list is a summary: the per-sample HR trace and route are omitted.
+    assert "heart_rate" not in w
+    assert "route_gpx" not in w
+
+
+def test_service_workout_detail(stack):
+    r = httpx.get(f"{stack.url}/api/v1/workouts/test-workout-001")
+    assert r.status_code == 200
+    w = r.json()
+    assert w["id"] == "test-workout-001"
+    assert "duration" in w
+    # Detail carries the full heart-rate trace the list omits.
+    assert w["heart_rate"]["samples"][0]["value"] == 145
+
+
+def test_service_workout_detail_404(stack):
+    r = httpx.get(f"{stack.url}/api/v1/workouts/does-not-exist")
+    assert r.status_code == 404
 
 
 def test_service_sleep_sessions(stack):

@@ -9,6 +9,7 @@ import gzip
 import logging
 
 from litestar import Request, get
+from litestar.response import Response
 
 from . import db
 
@@ -342,8 +343,6 @@ async def service_get_workouts(request: Request) -> dict:
 
         ids = [r[0] for r in rows]
         scalars: dict[str, dict[str, tuple]] = {}
-        routes: dict[str, str] = {}
-        hr_series: dict[str, list] = {}
         if ids:
             placeholders = ",".join("?" * len(ids))
             srows = await (await conn.execute(
@@ -353,61 +352,85 @@ async def service_get_workouts(request: Request) -> dict:
             for wid, name, qty, units in srows:
                 scalars.setdefault(wid, {})[name] = (qty, units)
 
-            rrows = await (await conn.execute(
-                f"SELECT workout_id, gpx_gzip FROM workout_routes WHERE workout_id IN ({placeholders})",
-                ids,
-            )).fetchall()
-            for wid, blob in rrows:
-                routes[wid] = gzip.decompress(blob).decode()
-
-            hrows = await (await conn.execute(
-                f"""SELECT workout_id, date, avg_hr FROM workout_heart_rate
-                    WHERE series = 'heartRate' AND workout_id IN ({placeholders})
-                    ORDER BY date""",
-                ids,
-            )).fetchall()
-            for wid, date, avg in hrows:
-                hr_series.setdefault(wid, []).append({"timestamp": date, "value": avg})
-
-    workouts = []
-    for r in reversed(rows):
-        wid, name = r[0], r[1]
-        s = scalars.get(wid, {})
-        wtype = _workout_type(name)
-        w = {
-            "start": r[2],
-            "end": r[3],
-            "workout_type": wtype,
-            "source": SOURCE,
-            "id": wid,
-        }
-        if r[4] is not None:
-            w["duration"] = _scalar("duration", "Duration", "min", r[4] / 60.0)
-        if r[5] is not None:
-            w["is_indoor"] = bool(r[5])
-        if wid in hr_series:
-            w["heart_rate"] = {
-                "metric_id": "heart_rate", "display_name": "Heart Rate",
-                "unit": "bpm", "source": SOURCE, "samples": hr_series[wid],
-            }
-
-        _emit_scalars(w, _BASE_SCALARS, s)
-        distance_m = None
-        if wtype == "swimming":
-            distance_m = _emit_scalars(w, _SWIM_SCALARS, s)
-        elif wtype in DISTANCE_TYPES:
-            distance_m = _emit_scalars(w, _DISTANCE_SCALARS, s)
-
-        # Pace, derived from distance + duration, for foot-based workouts.
-        if wtype in PACE_TYPES and distance_m and r[4]:
-            pace = r[4] / (distance_m / 1000.0)
-            w["average_pace"] = _scalar("pace", "Avg Pace", "s/km", pace)
-
-        # GPS route as a GPX document (route_gpx lives on the route-capable
-        # subclasses: DistanceWorkout and SwimmingWorkout).
-        if (wtype == "swimming" or wtype in DISTANCE_TYPES) and wid in routes:
-            w["route_gpx"] = routes[wid]
-
-        workouts.append(w)
-
+    # The list returns scalar summaries only; the heart-rate trace and route
+    # (potentially megabytes per workout) are served by the per-workout detail
+    # endpoint below.
+    workouts = [_build_workout(r, scalars.get(r[0], {})) for r in reversed(rows)]
     return {"count": len(workouts), "data": workouts}
+
+
+def _build_workout(r, s, hr_samples=None, route_gpx=None) -> dict:
+    """Build a workout dict from a row and its scalars. Pass hr_samples and
+    route_gpx to include the full per-sample detail (used by the detail endpoint)."""
+    wid, name = r[0], r[1]
+    wtype = _workout_type(name)
+    w = {
+        "start": r[2],
+        "end": r[3],
+        "workout_type": wtype,
+        "source": SOURCE,
+        "id": wid,
+    }
+    if r[4] is not None:
+        w["duration"] = _scalar("duration", "Duration", "min", r[4] / 60.0)
+    if r[5] is not None:
+        w["is_indoor"] = bool(r[5])
+    if hr_samples:
+        w["heart_rate"] = {
+            "metric_id": "heart_rate", "display_name": "Heart Rate",
+            "unit": "bpm", "source": SOURCE, "samples": hr_samples,
+        }
+
+    _emit_scalars(w, _BASE_SCALARS, s)
+    distance_m = None
+    if wtype == "swimming":
+        distance_m = _emit_scalars(w, _SWIM_SCALARS, s)
+    elif wtype in DISTANCE_TYPES:
+        distance_m = _emit_scalars(w, _DISTANCE_SCALARS, s)
+
+    # Pace, derived from distance + duration, for foot-based workouts.
+    if wtype in PACE_TYPES and distance_m and r[4]:
+        pace = r[4] / (distance_m / 1000.0)
+        w["average_pace"] = _scalar("pace", "Avg Pace", "s/km", pace)
+
+    # GPS route as a GPX document (route_gpx lives on the route-capable
+    # subclasses: DistanceWorkout and SwimmingWorkout).
+    if route_gpx and (wtype == "swimming" or wtype in DISTANCE_TYPES):
+        w["route_gpx"] = route_gpx
+
+    return w
+
+
+@get("/api/v1/workouts/{workout_id:str}")
+async def service_get_workout(workout_id: str) -> Response:
+    """One workout's full detail: scalar metrics plus the heart-rate trace and
+    GPS route that the list endpoint omits."""
+    async with db.connect() as conn:
+        row = await (await conn.execute(
+            """SELECT workout_id, name, start_ts, end_ts, duration, is_indoor
+               FROM workouts WHERE workout_id = ?""",
+            (workout_id,),
+        )).fetchone()
+        if not row:
+            return Response(content={"error": "not found"}, status_code=404)
+
+        srows = await (await conn.execute(
+            "SELECT name, qty, units FROM workout_scalars WHERE workout_id = ?",
+            (workout_id,),
+        )).fetchall()
+        scalars = {name: (qty, units) for name, qty, units in srows}
+
+        hrows = await (await conn.execute(
+            """SELECT date, avg_hr FROM workout_heart_rate
+               WHERE series = 'heartRate' AND workout_id = ? ORDER BY date""",
+            (workout_id,),
+        )).fetchall()
+        hr_samples = [{"timestamp": date, "value": avg} for date, avg in hrows]
+
+        rrow = await (await conn.execute(
+            "SELECT gpx_gzip FROM workout_routes WHERE workout_id = ?",
+            (workout_id,),
+        )).fetchone()
+        route_gpx = gzip.decompress(rrow[0]).decode() if rrow else None
+
+    return Response(content=_build_workout(row, scalars, hr_samples or None, route_gpx))

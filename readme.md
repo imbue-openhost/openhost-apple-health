@@ -16,3 +16,4 @@ manual import:
   - time grouping to minutes (export is waaay slower if you set to seconds).
   - this completes for me in a couple mins for several hundred workouts
   - upload the resulting .zip on the dashboard. i synced it to my laptop via airdrop.
+    - (the upload goes faster if you unzip, and then re-zip just the json. the original zip doesn't seem to actually be compressed, and the gpx files are redundant to the json route data).

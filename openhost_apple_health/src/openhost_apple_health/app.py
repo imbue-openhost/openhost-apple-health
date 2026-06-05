@@ -16,6 +16,7 @@ from .service import (
     service_get_time_series,
     service_get_sleep_sessions,
     service_get_workouts,
+    service_get_workout,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -252,7 +253,7 @@ app = Litestar(
         import_upload, import_status, workout_route,
         get_heart_rate, get_stats,
         service_list_metrics, service_get_time_series,
-        service_get_sleep_sessions, service_get_workouts,
+        service_get_sleep_sessions, service_get_workouts, service_get_workout,
     ],
     on_startup=[on_startup],
     request_max_body_size=100 * 1024 * 1024,
