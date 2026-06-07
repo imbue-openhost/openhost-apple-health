@@ -318,3 +318,34 @@ def test_manual_import_plain_json(stack):
     g = httpx.get(f"{stack.url}/workouts/manual-json-1/route.gpx")
     assert g.status_code == 200
     assert g.text.count("<trkpt") == 2
+
+
+def test_workouts_ordered_and_filtered_by_instant_not_string(stack):
+    """Offset-bearing timestamps must order/filter by true UTC instant.
+
+    tz-late is chronologically later than tz-early (06:30Z vs 23:00Z the prior
+    day) but sorts *earlier* as a raw string, so a lexical compare would both
+    misorder the list and wrongly drop tz-late from a UTC `start` window.
+    """
+    payload = {
+        "data": {
+            "workouts": [
+                {"id": "tz-late", "name": "Running",
+                 "start": "2026-04-02T23:30:00-07:00", "end": "2026-04-02T23:45:00-07:00"},
+                {"id": "tz-early", "name": "Running",
+                 "start": "2026-04-03T01:00:00+02:00", "end": "2026-04-03T01:15:00+02:00"},
+            ]
+        }
+    }
+    r = httpx.post(f"{stack.url}/api/data", json=payload, headers={"api-key": _api_key(stack)})
+    assert r.status_code == 200
+
+    # Full list is ascending by instant, so tz-late (later instant) comes after tz-early.
+    ids = [w["id"] for w in httpx.get(f"{stack.url}/api/v1/workouts?limit=5000").json()["data"]]
+    assert ids.index("tz-late") > ids.index("tz-early")
+
+    # A UTC `start` window between the two instants includes only tz-late.
+    window = httpx.get(f"{stack.url}/api/v1/workouts?limit=5000&start=2026-04-03T04:00:00Z").json()["data"]
+    window_ids = {w["id"] for w in window}
+    assert "tz-late" in window_ids
+    assert "tz-early" not in window_ids

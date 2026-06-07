@@ -139,17 +139,17 @@ async def _hr_time_series(start, end, limit) -> dict:
     conditions = []
     params: list = []
     if start:
-        conditions.append("date >= ?")
+        conditions.append("datetime(date) >= datetime(?)")
         params.append(start)
     if end:
-        conditions.append("date <= ?")
+        conditions.append("datetime(date) <= datetime(?)")
         params.append(end)
     params.append(limit)
 
     where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
     async with db.connect() as conn:
         rows = await (await conn.execute(
-            f"SELECT date, avg_hr FROM heart_rate {where} ORDER BY date LIMIT ?",
+            f"SELECT date, avg_hr FROM heart_rate {where} ORDER BY datetime(date) LIMIT ?",
             params,
         )).fetchall()
 
@@ -169,17 +169,17 @@ async def _quantity_time_series(metric, start, end, limit) -> dict:
     conditions = ["metric_name = ?"]
     params: list = [metric]
     if start:
-        conditions.append("date >= ?")
+        conditions.append("datetime(date) >= datetime(?)")
         params.append(start)
     if end:
-        conditions.append("date <= ?")
+        conditions.append("datetime(date) <= datetime(?)")
         params.append(end)
     params.append(limit)
 
     where = " AND ".join(conditions)
     async with db.connect() as conn:
         rows = await (await conn.execute(
-            f"SELECT date, qty, units FROM metrics WHERE {where} ORDER BY date LIMIT ?",
+            f"SELECT date, qty, units FROM metrics WHERE {where} ORDER BY datetime(date) LIMIT ?",
             params,
         )).fetchall()
 
@@ -205,10 +205,10 @@ async def service_get_sleep_sessions(request: Request) -> dict:
     conditions = []
     params: list = []
     if start:
-        conditions.append("date >= ?")
+        conditions.append("datetime(date) >= datetime(?)")
         params.append(start)
     if end:
-        conditions.append("date <= ?")
+        conditions.append("datetime(date) <= datetime(?)")
         params.append(end)
     params.append(limit)
 
@@ -217,7 +217,7 @@ async def service_get_sleep_sessions(request: Request) -> dict:
         rows = await (await conn.execute(
             f"""SELECT date, in_bed_start, in_bed_end, sleep_start, sleep_end,
                        core, rem, deep, awake, in_bed, source
-                FROM sleep_analysis {where} ORDER BY date DESC LIMIT ?""",
+                FROM sleep_analysis {where} ORDER BY datetime(date) DESC LIMIT ?""",
             params,
         )).fetchall()
 
@@ -325,11 +325,13 @@ async def service_get_workouts(request: Request) -> dict:
         else:
             conditions.append("name = ?")
             params.append(workout_type)
+    # start_ts is stored as offset-bearing ISO (e.g. ...-07:00); compare/order as
+    # true UTC instants so a lexical string compare can't drop boundary workouts.
     if start:
-        conditions.append("start_ts >= ?")
+        conditions.append("datetime(start_ts) >= datetime(?)")
         params.append(start)
     if end:
-        conditions.append("start_ts <= ?")
+        conditions.append("datetime(start_ts) <= datetime(?)")
         params.append(end)
     params.append(limit)
 
@@ -337,7 +339,7 @@ async def service_get_workouts(request: Request) -> dict:
     async with db.connect() as conn:
         rows = await (await conn.execute(
             f"""SELECT workout_id, name, start_ts, end_ts, duration, is_indoor
-                FROM workouts {where} ORDER BY start_ts DESC LIMIT ?""",
+                FROM workouts {where} ORDER BY datetime(start_ts) DESC LIMIT ?""",
             params,
         )).fetchall()
 
