@@ -30,6 +30,17 @@ WORKOUT_TYPE_PATTERNS = {
     "downhill_skiing": ("ski",),
     "strength": ("strength",),
     "yoga": ("yoga",),
+    # "Stair Climbing" must be matched before "climb" so it doesn't read as climbing.
+    "stair_climbing": ("stair",),
+    "climbing": ("climb",),
+    "volleyball": ("volleyball",),
+    "pickleball": ("pickleball",),
+    "tennis": ("tennis",),
+    "badminton": ("badminton",),
+    "elliptical": ("elliptical",),
+    "rowing": ("row",),
+    "core_training": ("core",),
+    "dance": ("dance",),
 }
 
 # Types whose workouts carry distance/speed/elevation (spec: DistanceWorkout).
