@@ -30,17 +30,6 @@ WORKOUT_TYPE_PATTERNS = {
     "downhill_skiing": ("ski",),
     "strength": ("strength",),
     "yoga": ("yoga",),
-    # "Stair Climbing" must be matched before "climb" so it doesn't read as climbing.
-    "stair_climbing": ("stair",),
-    "climbing": ("climb",),
-    "volleyball": ("volleyball",),
-    "pickleball": ("pickleball",),
-    "tennis": ("tennis",),
-    "badminton": ("badminton",),
-    "elliptical": ("elliptical",),
-    "rowing": ("row",),
-    "core_training": ("core",),
-    "dance": ("dance",),
 }
 
 # Types whose workouts carry distance/speed/elevation (spec: DistanceWorkout).
@@ -49,12 +38,20 @@ DISTANCE_TYPES = {"running", "walking", "hiking", "cycling", "snowboarding", "do
 PACE_TYPES = {"running", "walking", "hiking"}
 
 
+def _slug(name: str) -> str:
+    """Lowercase, spaces to underscores. Mirrored by the SQL filter below."""
+    return (name or "").strip().lower().replace(" ", "_")
+
+
 def _workout_type(name: str) -> str:
+    """Map a workout to a canonical rich type by keyword, else keep its own
+    name as a slug (e.g. "Volleyball" -> "volleyball") so every activity is
+    labelled rather than collapsed to "other"."""
     low = (name or "").lower()
     for wtype, keys in WORKOUT_TYPE_PATTERNS.items():
         if any(k in low for k in keys):
             return wtype
-    return "other"
+    return _slug(name) or "other"
 
 
 def _to_meters(qty: float, units: str | None) -> float:
@@ -334,7 +331,8 @@ async def service_get_workouts(request: Request) -> dict:
             conditions.append("(" + " OR ".join("LOWER(name) LIKE ?" for _ in keys) + ")")
             params.extend(f"%{k}%" for k in keys)
         else:
-            conditions.append("name = ?")
+            # Non-canonical types are name slugs; match the same slugging in SQL.
+            conditions.append("REPLACE(LOWER(name), ' ', '_') = ?")
             params.append(workout_type)
     # start_ts is stored as offset-bearing ISO (e.g. ...-07:00); compare/order as
     # true UTC instants so a lexical string compare can't drop boundary workouts.
